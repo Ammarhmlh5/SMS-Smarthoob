@@ -1,0 +1,5 @@
+[functions.gateway-settings]
+verify_jwt = true
+
+[functions.hoodhad-send]
+verify_jwt = true

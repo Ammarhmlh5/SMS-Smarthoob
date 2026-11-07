@@ -1,0 +1,13 @@
+{
+  "projectId": "72670534",
+  "functions": {
+    "gateway-settings": {
+      "hasChanged": false,
+      "hash": "baf4322612fabf926c330a3d8bfbe4cd3cfdbb975af5ff9c800fa0129b4e8c86"
+    },
+    "hoodhad-send": {
+      "hasChanged": false,
+      "hash": "fa04f9b40be945041f17c6f7ad4abb8f90f429638abfb97fde4ee6dc5641d2d2"
+    }
+  }
+}
