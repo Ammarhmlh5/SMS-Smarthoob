@@ -70,6 +70,32 @@ export interface SyncLog {
   synced: boolean;
 }
 
+export type OutgoingMessageStatus =
+  | 'PENDING'
+  | 'QUEUED'
+  | 'SENDING'
+  | 'SENT'
+  | 'FAILED'
+  | 'RETRY_WAITING'
+  | 'BLOCKED';
+
+export interface OutgoingMessage {
+  id: number;
+  campaign_id: string;
+  phone: string;
+  message: string;
+  gateway_id: string;
+  status: OutgoingMessageStatus;
+  retry_count: number;
+  max_retry_attempts: number;
+  payload_json: string | null;
+  last_error: string | null;
+  correlation_id: string | null;
+  created_at: string;
+  updated_at: string;
+  last_attempt_at: string | null;
+}
+
 // =====================
 // Database Helper
 // =====================
@@ -87,6 +113,9 @@ class Database {
     
     // Run initial sync after establishing connection
     await this.syncWithSupabase();
+
+    // Recovery: Convert any hanging 'SENDING' messages to 'RETRY_WAITING'
+    await this.resetSendingToRetryWaiting();
   }
 
   private async createTables(): Promise<void> {
@@ -157,6 +186,24 @@ class Database {
         synced INTEGER DEFAULT 0
       );
 
+      -- Outgoing Messages Queue table
+      CREATE TABLE IF NOT EXISTS outgoing_messages (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        campaign_id TEXT NOT NULL,
+        phone TEXT NOT NULL,
+        message TEXT NOT NULL,
+        gateway_id TEXT NOT NULL,
+        status TEXT NOT NULL DEFAULT 'PENDING',
+        retry_count INTEGER NOT NULL DEFAULT 0,
+        max_retry_attempts INTEGER NOT NULL DEFAULT 3,
+        payload_json TEXT,
+        last_error TEXT,
+        correlation_id TEXT,
+        created_at TEXT NOT NULL,
+        updated_at TEXT NOT NULL,
+        last_attempt_at TEXT
+      );
+
       -- Create indexes
       CREATE INDEX IF NOT EXISTS idx_templates_user ON templates(user_id);
       CREATE INDEX IF NOT EXISTS idx_campaigns_user ON campaigns(user_id);
@@ -164,6 +211,8 @@ class Database {
       CREATE INDEX IF NOT EXISTS idx_recipients_campaign ON campaign_recipients(campaign_id);
       CREATE INDEX IF NOT EXISTS idx_connections_user ON gateway_connections(user_id);
       CREATE INDEX IF NOT EXISTS idx_sync_pending ON sync_log(synced);
+      CREATE INDEX IF NOT EXISTS idx_outgoing_status ON outgoing_messages(status);
+      CREATE INDEX IF NOT EXISTS idx_outgoing_campaign ON outgoing_messages(campaign_id);
     `);
 
     // Insert default templates if not exist
@@ -654,6 +703,152 @@ class Database {
   }
 
   // =====================
+  // Outgoing Queue Operations
+  // =====================
+
+  async queueCampaignMessages(
+    campaignId: string,
+    gatewayId: string,
+    messages: { phone: string; message: string; payload?: unknown }[],
+    maxRetries: number = 3
+  ): Promise<void> {
+    if (!this.db) await this.initialize();
+    const now = new Date().toISOString();
+
+    for (const msg of messages) {
+      await this.db!.runAsync(
+        `INSERT INTO outgoing_messages (
+           campaign_id, phone, message, gateway_id, status,
+           retry_count, max_retry_attempts, payload_json,
+           created_at, updated_at
+         ) VALUES (?, ?, ?, ?, 'PENDING', 0, ?, ?, ?, ?)`,
+        [
+          campaignId,
+          msg.phone,
+          msg.message,
+          gatewayId,
+          maxRetries,
+          msg.payload ? JSON.stringify(msg.payload) : null,
+          now,
+          now,
+        ]
+      );
+    }
+  }
+
+  async getPendingOutgoingMessages(limit: number = 50, campaignId?: string): Promise<OutgoingMessage[]> {
+    if (!this.db) await this.initialize();
+
+    let query = `
+      SELECT * FROM outgoing_messages 
+      WHERE status IN ('PENDING', 'RETRY_WAITING')
+    `;
+    const params: (string | number)[] = [];
+
+    if (campaignId) {
+      query += ` AND campaign_id = ?`;
+      params.push(campaignId);
+    }
+
+    query += ` ORDER BY id ASC LIMIT ?`;
+    params.push(limit);
+
+    return this.db!.getAllAsync<OutgoingMessage>(query, params);
+  }
+
+  async updateOutgoingStatus(
+    id: number,
+    status: OutgoingMessageStatus,
+    updates?: { error?: string; correlationId?: string; incrementRetry?: boolean }
+  ): Promise<void> {
+    if (!this.db) await this.initialize();
+    const now = new Date().toISOString();
+
+    let query = `UPDATE outgoing_messages SET status = ?, updated_at = ?, last_attempt_at = ?`;
+    const params: (string | number | null)[] = [status, now, now];
+
+    if (updates?.error !== undefined) {
+      query += `, last_error = ?`;
+      params.push(updates.error);
+    }
+
+    if (updates?.correlationId !== undefined) {
+      query += `, correlation_id = ?`;
+      params.push(updates.correlationId);
+    }
+
+    if (updates?.incrementRetry) {
+      query += `, retry_count = retry_count + 1`;
+    }
+
+    query += ` WHERE id = ?`;
+    params.push(id);
+
+    await this.db!.runAsync(query, params);
+  }
+
+  async markOutgoingBlocked(campaignId: string, reason: string): Promise<void> {
+    if (!this.db) await this.initialize();
+    const now = new Date().toISOString();
+
+    await this.db!.runAsync(
+      `UPDATE outgoing_messages 
+       SET status = 'BLOCKED', last_error = ?, updated_at = ?
+       WHERE campaign_id = ? AND status IN ('PENDING', 'RETRY_WAITING', 'QUEUED')`,
+      [reason, now, campaignId]
+    );
+  }
+
+  async resetSendingToRetryWaiting(): Promise<void> {
+    if (!this.db) return;
+    const now = new Date().toISOString();
+
+    await this.db.runAsync(
+      `UPDATE outgoing_messages 
+       SET status = 'RETRY_WAITING', updated_at = ?
+       WHERE status = 'SENDING'`,
+      [now]
+    );
+  }
+
+  async getCampaignQueueStats(campaignId: string): Promise<{
+    pending: number;
+    sending: number;
+    sent: number;
+    failed: number;
+    blocked: number;
+    total: number;
+  }> {
+    if (!this.db) await this.initialize();
+
+    const rows = await this.db!.getAllAsync<{ status: OutgoingMessageStatus; count: number }>(
+      `SELECT status, COUNT(*) as count 
+       FROM outgoing_messages 
+       WHERE campaign_id = ? 
+       GROUP BY status`,
+      [campaignId]
+    );
+
+    const stats = { pending: 0, sending: 0, sent: 0, failed: 0, blocked: 0, total: 0 };
+    for (const r of rows) {
+      stats.total += r.count;
+      if (r.status === 'PENDING' || r.status === 'QUEUED' || r.status === 'RETRY_WAITING') {
+        stats.pending += r.count;
+      } else if (r.status === 'SENDING') {
+        stats.sending += r.count;
+      } else if (r.status === 'SENT') {
+        stats.sent += r.count;
+      } else if (r.status === 'FAILED') {
+        stats.failed += r.count;
+      } else if (r.status === 'BLOCKED') {
+        stats.blocked += r.count;
+      }
+    }
+
+    return stats;
+  }
+
+  // =====================
   // Utility Methods
   // =====================
 
@@ -671,6 +866,7 @@ class Database {
     if (!this.db) await this.initialize();
     
     await this.db!.execAsync(`
+      DELETE FROM outgoing_messages;
       DELETE FROM campaign_recipients;
       DELETE FROM campaigns;
       DELETE FROM templates WHERE is_default = 0;

@@ -140,6 +140,18 @@ export async function sendCampaign(params: {
           error_message: null,
         }))
       );
+
+      // Queue in outgoing_messages table for controlled throttle/retry processing
+      await database.queueCampaignMessages(
+        campaignId,
+        params.connection_id,
+        params.recipients.map((r) => ({
+          phone: r.phone || r.email || '',
+          message: r.message || '',
+          payload: r.data,
+        })),
+        params.max_retries
+      );
     } catch (dbErr) {
       console.warn('Failed to save campaign locally before sending:', dbErr);
     }
