@@ -9,7 +9,10 @@ import { fetchTemplates } from '@/lib/templates';
 import type { MessageTemplate } from '@/lib/templates';
 import { colors, fonts, spacing } from '@/constants/theme';
 
-type FormState = { mode: 'closed' } | { mode: 'create' } | { mode: 'edit'; template: MessageTemplate };
+type FormState =
+  | { mode: 'closed' }
+  | { mode: 'create'; initialValues?: { title: string; body: string } }
+  | { mode: 'edit'; template: MessageTemplate };
 
 export default function TemplatesScreen() {
   const insets = useSafeAreaInsets();
@@ -42,6 +45,16 @@ export default function TemplatesScreen() {
         : [saved, ...current];
     });
     setForm({ mode: 'closed' });
+  };
+
+  const handleCopy = (tmpl: MessageTemplate) => {
+    setForm({
+      mode: 'create',
+      initialValues: {
+        title: `نسخة من ${tmpl.title}`,
+        body: tmpl.body,
+      },
+    });
   };
 
   const handleDeleted = (id: string) => {
@@ -110,6 +123,7 @@ export default function TemplatesScreen() {
               template={template}
               disabled={form.mode !== 'closed'}
               onEdit={() => setForm({ mode: 'edit', template })}
+              onCopy={() => handleCopy(template)}
               onDeleted={handleDeleted}
             />
           ))}
@@ -129,6 +143,7 @@ export default function TemplatesScreen() {
               <TemplateForm
                 key={form.mode === 'edit' ? form.template.id : 'create'}
                 template={form.mode === 'edit' ? form.template : null}
+                initialValues={form.mode === 'create' ? form.initialValues : undefined}
                 onSaved={handleSaved}
                 onCancel={() => setForm({ mode: 'closed' })}
               />

@@ -13,7 +13,23 @@
       "image": "./assets/images/icon.png"
     },
     "ios": {
-      "supportsTablet": true
+      "supportsTablet": true,
+      "infoPlist": {
+        "NSPhotoLibraryUsageDescription": "يرجى السماح بالوصول لمكتبة الصور لاستيراد ملفات البيانات",
+        "NSCameraUsageDescription": "يرجى السماح بالكاميرا لمسح المستندات ضوئياً",
+        "UISupportsDocumentBrowser": true,
+        "LSSupportsOpeningDocumentsInPlace": true
+      }
+    },
+    "android": {
+      "package": "com.hudhud.invoices",
+      "permissions": [
+        "READ_EXTERNAL_STORAGE",
+        "WRITE_EXTERNAL_STORAGE",
+        "READ_MEDIA_IMAGES",
+        "INTERNET",
+        "ACCESS_NETWORK_STATE"
+      ]
     },
     "web": {
       "bundler": "metro",
@@ -25,7 +41,11 @@
       "expo-font",
       "expo-web-browser",
       "expo-splash-screen",
-      "expo-status-bar"
+      "expo-status-bar",
+      [
+        "expo-document-picker",
+        {}
+      ]
     ],
     "experiments": {
       "typedRoutes": true

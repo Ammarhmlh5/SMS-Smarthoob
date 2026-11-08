@@ -11,6 +11,7 @@ const corsHeaders = {
 type Subscriber = {
   email: string;
   name: string;
+  message?: string;
 };
 
 const supabase = createClient(
@@ -187,14 +188,22 @@ async function handleSendCampaign(req: Request, body: Record<string, unknown>) {
     .maybeSingle();
   if (tmplError || !tmpl) return json({ error: "Template not found" }, 404);
 
-  // Fetch subscribers from HodHod
+  // Fetch subscribers from HodHod or use custom recipients
   let subscribers: Subscriber[];
-  try {
-    subscribers = await fetchHodHodSubscribers(conn.api_key, conn.endpoint_url);
-  } catch (err) {
-    return json({
-      error: err instanceof Error ? err.message : "Failed to fetch subscribers",
-    }, 502);
+  if (Array.isArray(body.recipients) && body.recipients.length > 0) {
+    subscribers = (body.recipients as any[]).map((r) => ({
+      email: String(r.phone || r.email || ""),
+      name: String(r.name || ""),
+      message: r.message ? String(r.message) : undefined,
+    }));
+  } else {
+    try {
+      subscribers = await fetchHodHodSubscribers(conn.api_key, conn.endpoint_url);
+    } catch (err) {
+      return json({
+        error: err instanceof Error ? err.message : "Failed to fetch subscribers",
+      }, 502);
+    }
   }
 
   if (subscribers.length === 0) {
@@ -238,7 +247,7 @@ async function handleSendCampaign(req: Request, body: Record<string, unknown>) {
     const batch = subscribers.slice(i, i + batchSize);
     const results = await Promise.all(
       batch.map(async (sub) => {
-        const message = replacePlaceholders(tmpl.body, {
+        const message = sub.message || replacePlaceholders(tmpl.body, {
           name: sub.name || "",
           email: sub.email,
         });
