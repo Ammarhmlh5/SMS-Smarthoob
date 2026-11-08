@@ -11,8 +11,10 @@ export const colors = {
     800: '#115E59',
   },
   secondary: {
+    50: '#F0F9FF',
     500: '#0EA5E9',
     600: '#0284C7',
+    700: '#0369A1',
   },
   accent: {
     400: '#FBBF24',
