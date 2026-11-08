@@ -22,6 +22,7 @@ import {
   RotateCw,
   Server,
   Trash2,
+  User,
 } from 'lucide-react-native';
 import { ConnectionCard } from '@/components/ConnectionCard';
 import { ConnectionForm } from '@/components/ConnectionForm';
@@ -29,36 +30,48 @@ import { SendingPreferencesForm } from '@/components/SendingPreferencesForm';
 import { fetchGatewaySettings } from '@/lib/gatewaySettings';
 import type { GatewayConnection, GatewaySettings } from '@/lib/gatewaySettings';
 import { database } from '@/lib/database';
-import { checkHealth, getApiBaseUrl, setApiBaseUrl } from '@/lib/api';
+import { checkHealth, setApiBaseUrl } from '@/lib/api';
 import { supabase } from '@/lib/supabase';
+import { loadSettings, saveApiBaseUrl, DEFAULT_SETTINGS } from '@/lib/settingsStore';
+import type { AppSettings } from '@/lib/settingsStore';
 import { colors, fonts, spacing } from '@/constants/theme';
 
 type FormState = { mode: 'closed' } | { mode: 'create' } | { mode: 'edit'; connection: GatewayConnection };
 
 export default function SettingsScreen() {
   const insets = useSafeAreaInsets();
+
+  // ─── حالة المستخدم ──────────────────────────────────────────────────────────
+  const [userEmail, setUserEmail] = useState<string | null>(null);
   const [signingOut, setSigningOut] = useState(false);
+
+  // ─── إعدادات البوابات ────────────────────────────────────────────────────────
   const [settings, setSettings] = useState<GatewaySettings | null>(null);
   const [loading, setLoading] = useState(true);
   const [loadError, setLoadError] = useState<string | null>(null);
   const [form, setForm] = useState<FormState>({ mode: 'closed' });
 
-  // Sync state
+  // ─── إعدادات التطبيق المحلية ─────────────────────────────────────────────────
+  const [appSettings, setAppSettings] = useState<AppSettings>(DEFAULT_SETTINGS);
+
+  // ─── المزامنة ────────────────────────────────────────────────────────────────
   const [pendingSyncCount, setPendingSyncCount] = useState<number>(0);
   const [syncing, setSyncing] = useState<boolean>(false);
   const [syncFeedback, setSyncFeedback] = useState<string | null>(null);
 
-  // Backend API URL state
-  const [apiUrl, setApiUrl] = useState<string>(getApiBaseUrl());
+  // ─── خادم الذكاء الاصطناعي ──────────────────────────────────────────────────
+  const [apiUrl, setApiUrl] = useState<string>(DEFAULT_SETTINGS.apiBaseUrl);
   const [checkingBackend, setCheckingBackend] = useState<boolean>(false);
   const [backendStatus, setBackendStatus] = useState<'idle' | 'online' | 'offline'>('idle');
+
+  // ─── تحميل البيانات ──────────────────────────────────────────────────────────
 
   const refreshSyncCount = useCallback(async () => {
     try {
       const count = await database.getPendingSyncCount();
       setPendingSyncCount(count);
     } catch {
-      // ignore
+      // تجاهل
     }
   }, []);
 
@@ -66,7 +79,18 @@ export default function SettingsScreen() {
     setLoading(true);
     setLoadError(null);
     try {
-      setSettings(await fetchGatewaySettings());
+      // تحميل إعدادات البوابات من السحابة
+      const [gatewayData, localSettings, { data: { user } }] = await Promise.all([
+        fetchGatewaySettings(),
+        loadSettings(),
+        supabase.auth.getUser(),
+      ]);
+
+      setSettings(gatewayData);
+      setAppSettings(localSettings);
+      setApiUrl(localSettings.apiBaseUrl);
+      setApiBaseUrl(localSettings.apiBaseUrl);
+      setUserEmail(user?.email ?? null);
       await refreshSyncCount();
     } catch (err) {
       setLoadError(err instanceof Error ? err.message : 'تعذر تحميل الإعدادات.');
@@ -78,6 +102,8 @@ export default function SettingsScreen() {
   useEffect(() => {
     load();
   }, [load]);
+
+  // ─── معالجات البوابات ────────────────────────────────────────────────────────
 
   const hasConnections = settings !== null && settings.connections.length > 0;
 
@@ -100,6 +126,8 @@ export default function SettingsScreen() {
     setForm((current) => (current.mode === 'edit' && current.connection.id === id ? { mode: 'closed' } : current));
   };
 
+  // ─── معالجات المزامنة ────────────────────────────────────────────────────────
+
   const handleManualSync = async () => {
     setSyncing(true);
     setSyncFeedback(null);
@@ -111,19 +139,6 @@ export default function SettingsScreen() {
       setSyncFeedback('تعذر إتمام المزامنة مع الخادم');
     } finally {
       setSyncing(false);
-    }
-  };
-
-  const handleTestBackend = async () => {
-    setCheckingBackend(true);
-    setApiBaseUrl(apiUrl);
-    try {
-      await checkHealth();
-      setBackendStatus('online');
-    } catch {
-      setBackendStatus('offline');
-    } finally {
-      setCheckingBackend(false);
     }
   };
 
@@ -141,7 +156,7 @@ export default function SettingsScreen() {
               await database.clearAllData();
               await load();
               Alert.alert('تم', 'تم مسح البيانات المحلية بنجاح');
-            } catch (err) {
+            } catch {
               Alert.alert('خطأ', 'تعذر مسح البيانات');
             }
           },
@@ -150,12 +165,50 @@ export default function SettingsScreen() {
     );
   };
 
+  // ─── معالجات خادم الذكاء الاصطناعي ──────────────────────────────────────────
+
+  const handleTestBackend = async () => {
+    setCheckingBackend(true);
+    const trimmedUrl = apiUrl.trim();
+    setApiBaseUrl(trimmedUrl);
+    try {
+      await saveApiBaseUrl(trimmedUrl);
+      setAppSettings((prev) => ({ ...prev, apiBaseUrl: trimmedUrl }));
+      await checkHealth();
+      setBackendStatus('online');
+    } catch {
+      setBackendStatus('offline');
+    } finally {
+      setCheckingBackend(false);
+    }
+  };
+
+  // ─── تسجيل الخروج ────────────────────────────────────────────────────────────
+
+  const handleSignOut = async () => {
+    Alert.alert('تسجيل الخروج', 'هل أنت متأكد من تسجيل الخروج؟', [
+      { text: 'إلغاء', style: 'cancel' },
+      {
+        text: 'تسجيل الخروج',
+        style: 'destructive',
+        onPress: async () => {
+          setSigningOut(true);
+          await supabase.auth.signOut();
+          setSigningOut(false);
+        },
+      },
+    ]);
+  };
+
+  // ─── الواجهة ──────────────────────────────────────────────────────────────────
+
   return (
     <ScrollView
       style={styles.screen}
       contentContainerStyle={[styles.content, { paddingTop: insets.top + spacing.md }]}
       keyboardShouldPersistTaps="handled"
     >
+      {/* الرأس */}
       <View style={styles.header}>
         <Text style={styles.heading}>الإعدادات</Text>
         <Text style={styles.subheading}>إدارة الاتصالات، المزامنة المحلية، وخادم الذكاء الاصطناعي</Text>
@@ -165,6 +218,7 @@ export default function SettingsScreen() {
         <View style={styles.card}>
           <View style={styles.centered}>
             <ActivityIndicator color={colors.primary[700]} />
+            <Text style={styles.loadingText}>جارٍ تحميل الإعدادات…</Text>
           </View>
         </View>
       ) : loadError || !settings ? (
@@ -184,9 +238,13 @@ export default function SettingsScreen() {
         </View>
       ) : (
         <>
-          {/* Gateway Connections */}
+          {/* ── 1. إدارة بوابات الإرسال ── */}
           <View style={styles.card}>
-            <Text style={styles.sectionTitle}>الخدمات المرتبطة (البوابات)</Text>
+            <View style={styles.sectionHeaderRow}>
+              <Server size={20} color={colors.primary[700]} strokeWidth={2} />
+              <Text style={styles.sectionTitle}>الخدمات المرتبطة (البوابات)</Text>
+            </View>
+
             <View style={[styles.statusRow, hasConnections ? styles.statusOk : styles.statusPending]}>
               {hasConnections ? (
                 <CircleCheck size={18} color={colors.success[600]} strokeWidth={2} />
@@ -230,13 +288,18 @@ export default function SettingsScreen() {
             )}
           </View>
 
-          {/* Sending Preferences */}
+          {/* ── 2. إعدادات الإرسال والدفعات ── */}
           <View style={styles.card}>
             <Text style={styles.sectionTitle}>إعدادات الإرسال والدفعات</Text>
-            <SendingPreferencesForm initial={settings} onSaved={setSettings} />
+            <SendingPreferencesForm
+              initial={settings}
+              appSettings={appSettings}
+              onSaved={setSettings}
+              onAppSettingsSaved={setAppSettings}
+            />
           </View>
 
-          {/* Offline-First SQLite Sync Card */}
+          {/* ── 3. المزامنة وقاعدة البيانات المحلية ── */}
           <View style={styles.card}>
             <View style={styles.sectionHeaderRow}>
               <Database size={20} color={colors.primary[700]} strokeWidth={2} />
@@ -249,15 +312,15 @@ export default function SettingsScreen() {
             <View style={styles.syncRow}>
               <Text style={styles.syncCountLabel}>سجلات معلقة بانتظار المزامنة:</Text>
               <View style={[styles.badge, pendingSyncCount > 0 ? styles.badgePending : styles.badgeSynced]}>
-                <Text style={[styles.badgeText, pendingSyncCount > 0 ? styles.badgePendingText : styles.badgeSyncedText]}>
+                <Text
+                  style={[styles.badgeText, pendingSyncCount > 0 ? styles.badgePendingText : styles.badgeSyncedText]}
+                >
                   {pendingSyncCount} سجل
                 </Text>
               </View>
             </View>
 
-            {syncFeedback ? (
-              <Text style={styles.syncFeedbackText}>{syncFeedback}</Text>
-            ) : null}
+            {syncFeedback ? <Text style={styles.syncFeedbackText}>{syncFeedback}</Text> : null}
 
             <View style={styles.buttonGrid}>
               <Pressable
@@ -285,7 +348,7 @@ export default function SettingsScreen() {
             </View>
           </View>
 
-          {/* AI Backend Configuration Card */}
+          {/* ── 4. خادم الذكاء الاصطناعي ── */}
           <View style={styles.card}>
             <View style={styles.sectionHeaderRow}>
               <Bot size={20} color={colors.primary[700]} strokeWidth={2} />
@@ -315,7 +378,11 @@ export default function SettingsScreen() {
               <Pressable
                 onPress={handleTestBackend}
                 disabled={checkingBackend}
-                style={({ pressed }) => [styles.testButton, pressed && styles.pressed, checkingBackend && styles.disabled]}
+                style={({ pressed }) => [
+                  styles.testButton,
+                  pressed && styles.pressed,
+                  checkingBackend && styles.disabled,
+                ]}
               >
                 {checkingBackend ? (
                   <ActivityIndicator color={colors.primary[700]} size="small" />
@@ -341,27 +408,37 @@ export default function SettingsScreen() {
             </View>
           </View>
 
-          {/* Sign Out Button */}
-          <Pressable
-            accessibilityRole="button"
-            accessibilityLabel="تسجيل الخروج"
-            onPress={async () => {
-              setSigningOut(true);
-              await supabase.auth.signOut();
-              setSigningOut(false);
-            }}
-            disabled={signingOut}
-            style={({ pressed }) => [styles.logoutButton, pressed && styles.pressed, signingOut && styles.disabled]}
-          >
-            {signingOut ? (
-              <ActivityIndicator color={colors.error[600]} />
-            ) : (
-              <>
-                <LogOut size={18} color={colors.error[600]} strokeWidth={2} />
-                <Text style={styles.logoutText}>تسجيل الخروج</Text>
-              </>
-            )}
-          </Pressable>
+          {/* ── 5. الحساب وتسجيل الخروج ── */}
+          <View style={styles.card}>
+            <View style={styles.sectionHeaderRow}>
+              <User size={20} color={colors.neutral[500]} strokeWidth={2} />
+              <Text style={styles.sectionTitle}>الحساب</Text>
+            </View>
+
+            {userEmail ? (
+              <View style={styles.accountRow}>
+                <Text style={styles.accountEmailLabel}>البريد الإلكتروني</Text>
+                <Text style={styles.accountEmail}>{userEmail}</Text>
+              </View>
+            ) : null}
+
+            <Pressable
+              accessibilityRole="button"
+              accessibilityLabel="تسجيل الخروج"
+              onPress={handleSignOut}
+              disabled={signingOut}
+              style={({ pressed }) => [styles.logoutButton, pressed && styles.pressed, signingOut && styles.disabled]}
+            >
+              {signingOut ? (
+                <ActivityIndicator color={colors.error[600]} />
+              ) : (
+                <>
+                  <LogOut size={18} color={colors.error[600]} strokeWidth={2} />
+                  <Text style={styles.logoutText}>تسجيل الخروج</Text>
+                </>
+              )}
+            </Pressable>
+          </View>
         </>
       )}
     </ScrollView>
@@ -430,6 +507,13 @@ const styles = StyleSheet.create({
   centered: {
     paddingVertical: spacing.md,
     alignItems: 'center',
+    gap: spacing.xs,
+  },
+  loadingText: {
+    fontFamily: fonts.regular,
+    fontSize: 14,
+    color: colors.neutral[500],
+    writingDirection: 'rtl',
   },
   errorBox: {
     gap: spacing.sm,
@@ -645,6 +729,24 @@ const styles = StyleSheet.create({
     fontSize: 12,
     color: colors.neutral[600],
   },
+  // الحساب
+  accountRow: {
+    gap: 2,
+    paddingVertical: 4,
+  },
+  accountEmailLabel: {
+    fontFamily: fonts.regular,
+    fontSize: 12,
+    color: colors.neutral[400],
+    textAlign: 'right',
+  },
+  accountEmail: {
+    fontFamily: fonts.semibold,
+    fontSize: 15,
+    color: colors.neutral[800],
+    textAlign: 'right',
+    writingDirection: 'ltr',
+  },
   logoutButton: {
     flexDirection: 'row-reverse',
     alignItems: 'center',
@@ -654,8 +756,7 @@ const styles = StyleSheet.create({
     borderRadius: 14,
     borderWidth: 1,
     borderColor: colors.error[500],
-    backgroundColor: colors.neutral[0],
-    marginTop: spacing.xs,
+    backgroundColor: colors.error[50],
   },
   logoutText: {
     fontFamily: fonts.bold,

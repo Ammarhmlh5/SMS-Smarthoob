@@ -1,18 +1,23 @@
 import { useState } from 'react';
-import { ActivityIndicator, Pressable, StyleSheet, Text, View } from 'react-native';
-import { CheckCircle2, Layers, Minus, Plus, RotateCcw } from 'lucide-react-native';
+import { ActivityIndicator, Pressable, StyleSheet, Switch, Text, View } from 'react-native';
+import { CheckCircle2, Clock, Layers, Minus, Plus, RotateCcw, Send } from 'lucide-react-native';
 import type { LucideIcon } from 'lucide-react-native';
 import { Field, formStyles as styles } from '@/components/FormField';
 import { saveSendingPreferences } from '@/lib/gatewaySettings';
 import type { GatewaySettings } from '@/lib/gatewaySettings';
+import { saveSendingConfig, setEnableRemoteSend } from '@/lib/settingsStore';
+import type { AppSettings } from '@/lib/settingsStore';
 import { colors, fonts, spacing } from '@/constants/theme';
 
-const BATCH_SIZE = { min: 10, max: 100, step: 10 };
+const BATCH_SIZE = { min: 10, max: 200, step: 10 };
 const RETRIES = { min: 0, max: 5, step: 1 };
+const DELAY_MS = { min: 0, max: 5000, step: 100 };
 
 type SendingPreferencesFormProps = {
   initial: GatewaySettings;
+  appSettings: AppSettings;
   onSaved: (settings: GatewaySettings) => void;
+  onAppSettingsSaved: (settings: AppSettings) => void;
 };
 
 type StepperProps = {
@@ -67,14 +72,24 @@ function StepButton({ label, disabled, onPress, Icon }: StepButtonProps) {
   );
 }
 
-export function SendingPreferencesForm({ initial, onSaved }: SendingPreferencesFormProps) {
+export function SendingPreferencesForm({
+  initial,
+  appSettings,
+  onSaved,
+  onAppSettingsSaved,
+}: SendingPreferencesFormProps) {
   const [batchSize, setBatchSize] = useState(initial.batch_size);
   const [maxRetries, setMaxRetries] = useState(initial.max_retries);
+  const [delayBetweenMs, setDelayBetweenMs] = useState(appSettings.delayBetweenMs);
+  const [enableRemoteSend, setEnableRemoteSendState] = useState(appSettings.enableRemoteSend);
   const [saving, setSaving] = useState(false);
+  const [togglingRemoteSend, setTogglingRemoteSend] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [saved, setSaved] = useState(false);
 
-  const changed = batchSize !== initial.batch_size || maxRetries !== initial.max_retries;
+  const gatewayChanged = batchSize !== initial.batch_size || maxRetries !== initial.max_retries;
+  const localChanged = delayBetweenMs !== appSettings.delayBetweenMs;
+  const changed = gatewayChanged || localChanged;
 
   const updateValue = (setter: (value: number) => void) => (value: number) => {
     setter(value);
@@ -85,6 +100,7 @@ export function SendingPreferencesForm({ initial, onSaved }: SendingPreferencesF
   const reset = () => {
     setBatchSize(initial.batch_size);
     setMaxRetries(initial.max_retries);
+    setDelayBetweenMs(appSettings.delayBetweenMs);
     setError(null);
     setSaved(false);
   };
@@ -93,9 +109,13 @@ export function SendingPreferencesForm({ initial, onSaved }: SendingPreferencesF
     setSaving(true);
     setError(null);
     try {
+      // حفظ في السحابة (Supabase) عبر gateway-settings
       const result = await saveSendingPreferences({ batch_size: batchSize, max_retries: maxRetries });
+      // حفظ الإعدادات المحلية في AsyncStorage
+      await saveSendingConfig({ batchSize, delayBetweenMs, maxRetryAttempts: maxRetries });
       setSaved(true);
       onSaved(result);
+      onAppSettingsSaved({ ...appSettings, batchSize, delayBetweenMs, maxRetryAttempts: maxRetries });
     } catch (err) {
       setError(err instanceof Error ? err.message : 'تعذر حفظ إعدادات الإرسال. حاول مرة أخرى.');
     } finally {
@@ -103,9 +123,24 @@ export function SendingPreferencesForm({ initial, onSaved }: SendingPreferencesF
     }
   };
 
+  const handleToggleRemoteSend = async (value: boolean) => {
+    setTogglingRemoteSend(true);
+    try {
+      await setEnableRemoteSend(value);
+      setEnableRemoteSendState(value);
+      onAppSettingsSaved({ ...appSettings, enableRemoteSend: value });
+    } catch {
+      // في حال فشل التخزين نعود للقيمة السابقة
+      setEnableRemoteSendState(!value);
+    } finally {
+      setTogglingRemoteSend(false);
+    }
+  };
+
   return (
     <View style={styles.form}>
-      <Field label="عدد الرسائل في كل دفعة" Icon={Layers} hint="بين 10 و 100">
+      {/* حجم الدفعة */}
+      <Field label="عدد الرسائل في كل دفعة" Icon={Layers} hint="بين 10 و 200">
         <Stepper
           value={batchSize}
           unit="رسالة"
@@ -117,6 +152,20 @@ export function SendingPreferencesForm({ initial, onSaved }: SendingPreferencesF
         />
       </Field>
 
+      {/* التأخير بين الرسائل */}
+      <Field label="التأخير بين الرسائل" Icon={Clock} hint="بالمللي ثانية (0–5000)">
+        <Stepper
+          value={delayBetweenMs}
+          unit="ms"
+          min={DELAY_MS.min}
+          max={DELAY_MS.max}
+          step={DELAY_MS.step}
+          disabled={saving}
+          onChange={updateValue(setDelayBetweenMs)}
+        />
+      </Field>
+
+      {/* محاولات إعادة الإرسال */}
       <Field label="محاولات إعادة الإرسال عند الفشل" Icon={RotateCcw} hint="بين 0 و 5">
         <Stepper
           value={maxRetries}
@@ -168,6 +217,31 @@ export function SendingPreferencesForm({ initial, onSaved }: SendingPreferencesF
             <Text style={styles.saveText}>حفظ إعدادات الإرسال</Text>
           )}
         </Pressable>
+      </View>
+
+      {/* Send Gate — تفعيل الإرسال الفعلي */}
+      <View style={stepperStyles.gateDivider} />
+      <View style={stepperStyles.gateRow}>
+        <View style={stepperStyles.gateInfo}>
+          <View style={stepperStyles.gateTitleRow}>
+            <Send size={16} color={enableRemoteSend ? colors.success[600] : colors.neutral[400]} strokeWidth={2} />
+            <Text style={[stepperStyles.gateTitle, enableRemoteSend && stepperStyles.gateTitleActive]}>
+              {enableRemoteSend ? 'الإرسال الفعلي مفعّل' : 'الإرسال الفعلي معطّل'}
+            </Text>
+          </View>
+          <Text style={stepperStyles.gateHint}>
+            {enableRemoteSend
+              ? 'سيُرسَل الحملات فعلياً عند الضغط على إرسال'
+              : 'الحملات تُحفظ محلياً فقط — فعّل للإرسال الفعلي'}
+          </Text>
+        </View>
+        <Switch
+          value={enableRemoteSend}
+          onValueChange={handleToggleRemoteSend}
+          disabled={togglingRemoteSend}
+          trackColor={{ false: colors.neutral[200], true: colors.success[600] + 'AA' }}
+          thumbColor={enableRemoteSend ? colors.success[600] : colors.neutral[400]}
+        />
       </View>
     </View>
   );
@@ -239,6 +313,44 @@ const stepperStyles = StyleSheet.create({
     fontFamily: fonts.semibold,
     fontSize: 15,
     color: colors.neutral[700],
+    writingDirection: 'rtl',
+  },
+  // Send Gate styles
+  gateDivider: {
+    height: 1,
+    backgroundColor: colors.neutral[100],
+    marginVertical: 4,
+  },
+  gateRow: {
+    flexDirection: 'row-reverse',
+    alignItems: 'center',
+    justifyContent: 'space-between',
+    gap: spacing.sm,
+    paddingVertical: 4,
+  },
+  gateInfo: {
+    flex: 1,
+    gap: 4,
+  },
+  gateTitleRow: {
+    flexDirection: 'row-reverse',
+    alignItems: 'center',
+    gap: 6,
+  },
+  gateTitle: {
+    fontFamily: fonts.semibold,
+    fontSize: 14,
+    color: colors.neutral[500],
+    writingDirection: 'rtl',
+  },
+  gateTitleActive: {
+    color: colors.success[700],
+  },
+  gateHint: {
+    fontFamily: fonts.regular,
+    fontSize: 12,
+    color: colors.neutral[400],
+    textAlign: 'right',
     writingDirection: 'rtl',
   },
 });
