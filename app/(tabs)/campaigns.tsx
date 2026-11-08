@@ -27,6 +27,8 @@ import {
 import { EmptyState } from '@/components/EmptyState';
 import { Field, formStyles } from '@/components/FormField';
 import { DocumentImportModal } from '@/components/DocumentImportModal';
+import { CampaignDetailModal } from '@/components/CampaignDetailModal';
+import type { CampaignRecipient } from '@/lib/database';
 import { extractPlaceholders, fetchTemplates, renderMessage } from '@/lib/templates';
 import type { MessageTemplate } from '@/lib/templates';
 import { fetchGatewaySettings } from '@/lib/gatewaySettings';
@@ -64,6 +66,11 @@ export default function CampaignsScreen() {
   const [subscribersError, setSubscribersError] = useState<string | null>(null);
   const [sendResult, setSendResult] = useState<{ sent: number; failed: number; total: number } | null>(null);
   const [sendError, setSendError] = useState<string | null>(null);
+
+  // Detail Modal & Retry state
+  const [selectedCampaignForDetail, setSelectedCampaignForDetail] = useState<Campaign | null>(null);
+  const [showDetailModal, setShowDetailModal] = useState(false);
+  const [sendingProgress, setSendingProgress] = useState<{ sent: number; total: number }>({ sent: 0, total: 0 });
 
   const load = useCallback(async () => {
     setLoading(true);
@@ -214,6 +221,27 @@ export default function CampaignsScreen() {
     setStep('preview');
   };
 
+  const handleRetryFailed = (failedRecipients: CampaignRecipient[]) => {
+    setShowDetailModal(false);
+    if (!selectedCampaignForDetail) return;
+
+    const retrySubs: Subscriber[] = failedRecipients.map((r) => ({
+      phone: r.subscriber_phone,
+      name: r.subscriber_name || '',
+      message: r.message_body || '',
+    }));
+
+    setSubscribers(retrySubs);
+    setCampaignName(`إعادة إرسال: ${selectedCampaignForDetail.name}`);
+    if (selectedCampaignForDetail.connection_id) {
+      setSelectedConnection(selectedCampaignForDetail.connection_id);
+    }
+    if (selectedCampaignForDetail.template_id) {
+      setSelectedTemplate(selectedCampaignForDetail.template_id);
+    }
+    setStep('preview');
+  };
+
   const handleSend = async () => {
     // 1. التحقق عبر Send Gate أولاً
     const gate = await evaluateSendGate({
@@ -225,6 +253,7 @@ export default function CampaignsScreen() {
       return;
     }
 
+    setSendingProgress({ sent: 0, total: subscribers.length });
     setStep('sending');
     setSendError(null);
     try {
@@ -236,6 +265,7 @@ export default function CampaignsScreen() {
         max_retries: settings?.max_retries ?? 3,
         recipients: subscribers,
       });
+      setSendingProgress({ sent: result.sent, total: result.total });
       setSendResult({ sent: result.sent, failed: result.failed, total: result.total });
       setStep('result');
       load();
@@ -618,7 +648,28 @@ export default function CampaignsScreen() {
               <View style={styles.centered}>
                 <ActivityIndicator color={colors.primary[700]} size="large" />
                 <Text style={styles.loadingText}>جاري إرسال الرسائل…</Text>
-                <Text style={styles.loadingSubText}>يتم الإرسال على دفعات مع مراعاة معدل الإرسال</Text>
+                
+                {/* Visual Progress Bar */}
+                <View style={styles.progressBarTrack}>
+                  <View
+                    style={[
+                      styles.progressBarFill,
+                      {
+                        width: `${
+                          sendingProgress.total > 0
+                            ? Math.min(100, Math.round((sendingProgress.sent / sendingProgress.total) * 100))
+                            : 10
+                        }%`,
+                      },
+                    ]}
+                  />
+                </View>
+
+                <Text style={styles.loadingSubText}>
+                  {sendingProgress.sent > 0
+                    ? `تم إرسال ${sendingProgress.sent} من ${sendingProgress.total} رسالة`
+                    : `يتم الإرسال على دفعات (${subscribers.length} رسالة)`}
+                </Text>
               </View>
             </View>
           ) : null}
@@ -661,9 +712,22 @@ export default function CampaignsScreen() {
           {/* Past campaigns list */}
           {campaigns.length > 0 ? (
             <View style={styles.card}>
-              <Text style={styles.sectionTitle}>الحملات السابقة (سجل المزامنة المحلي)</Text>
+              <View style={styles.sectionHeaderRow}>
+                <Layers size={18} color={colors.primary[700]} />
+                <Text style={styles.sectionTitle}>الحملات السابقة (سجل المزامنة المحلي)</Text>
+              </View>
+              <Text style={styles.cardHint}>اضغط على أي حملة لاستعراض تفاصيل المستلمين وإعادة إرسال الفاشلة</Text>
               {campaigns.map((camp) => (
-                <View key={camp.id} style={styles.campaignItem}>
+                <Pressable
+                  key={camp.id}
+                  accessibilityRole="button"
+                  accessibilityLabel={`تفاصيل حملة ${camp.name}`}
+                  onPress={() => {
+                    setSelectedCampaignForDetail(camp);
+                    setShowDetailModal(true);
+                  }}
+                  style={({ pressed }) => [styles.campaignItem, pressed && styles.pressed]}
+                >
                   <View style={styles.campaignHeader}>
                     <Text style={styles.campaignName} numberOfLines={1}>{camp.name}</Text>
                     {renderStatusBadge(camp.status)}
@@ -685,12 +749,23 @@ export default function CampaignsScreen() {
                       day: 'numeric',
                     })}
                   </Text>
-                </View>
+                </Pressable>
               ))}
             </View>
           ) : null}
         </>
       )}
+
+      {/* Campaign Detail Modal Overlay */}
+      <CampaignDetailModal
+        campaign={selectedCampaignForDetail}
+        visible={showDetailModal}
+        onClose={() => {
+          setShowDetailModal(false);
+          setSelectedCampaignForDetail(null);
+        }}
+        onRetryFailed={handleRetryFailed}
+      />
 
       {/* Document Import Modal Overlay */}
       <Modal
@@ -751,6 +826,31 @@ const styles = StyleSheet.create({
     borderColor: colors.neutral[200],
     padding: spacing.sm,
     gap: spacing.sm,
+  },
+  cardHint: {
+    fontFamily: fonts.regular,
+    fontSize: 12,
+    color: colors.neutral[500],
+    textAlign: 'right',
+    writingDirection: 'rtl',
+  },
+  progressBarTrack: {
+    width: '100%',
+    height: 8,
+    borderRadius: 4,
+    backgroundColor: colors.neutral[200],
+    overflow: 'hidden',
+    marginVertical: spacing.xs,
+  },
+  progressBarFill: {
+    height: '100%',
+    backgroundColor: colors.primary[600],
+    borderRadius: 4,
+  },
+  sectionHeaderRow: {
+    flexDirection: 'row-reverse',
+    alignItems: 'center',
+    gap: spacing.xs / 2,
   },
   sectionTitle: {
     fontFamily: fonts.bold,
