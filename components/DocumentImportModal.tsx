@@ -20,11 +20,12 @@ import { useAuth } from '@/lib/auth';
 
 type Props = {
   variables: string[];
-  onMapped: (mapping: Record<string, string>) => void;
+  onMapped: (mapping: Record<string, string>, document?: DocumentAnalysis) => void;
   onCancel: () => void;
 };
 
 export function DocumentImportModal({ variables, onMapped, onCancel }: Props) {
+  const { session } = useAuth();
   const [step, setStep] = useState<'pick' | 'mapping' | 'done'>('pick');
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -56,7 +57,7 @@ export function DocumentImportModal({ variables, onMapped, onCancel }: Props) {
         return;
       }
 
-      const userId = 'test-user';
+      const userId = session?.user?.id || 'default';
       let transformedDoc: DocumentAnalysis | null = null;
 
       // Determine MIME type
@@ -94,6 +95,9 @@ export function DocumentImportModal({ variables, onMapped, onCancel }: Props) {
           columnInfo: {},
           rowCount: parsed.rowCount,
           fileName: result.name,
+          records: parsed.sampleData,
+          suggestedPhoneColumn: parsed.suggestedPhoneColumn,
+          suggestedNameColumn: parsed.suggestedNameColumn,
         };
 
         if (parsed.detectedColumns) {
@@ -141,7 +145,7 @@ export function DocumentImportModal({ variables, onMapped, onCancel }: Props) {
         validMappings[variable] = column;
       }
     }
-    onMapped(validMappings);
+    onMapped(validMappings, document || undefined);
     setStep('done');
   };
 

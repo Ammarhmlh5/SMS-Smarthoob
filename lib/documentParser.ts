@@ -18,6 +18,9 @@ export type DocumentAnalysis = {
   columnInfo: Record<string, ColumnInfo>;
   rowCount: number;
   fileName: string;
+  records?: Record<string, string>[];
+  suggestedPhoneColumn?: string;
+  suggestedNameColumn?: string;
 };
 
 export type VariableMapping = {
@@ -257,11 +260,34 @@ export async function parseDocumentFile(uri: string, fileName: string): Promise<
       columnInfo[header] = analyzeColumn(header, values);
     }
 
+    const records = rows.map((row) => {
+      const record: Record<string, string> = {};
+      headers.forEach((h, i) => {
+        record[h] = row[i] || '';
+      });
+      return record;
+    });
+
+    let suggestedPhoneColumn: string | undefined;
+    let suggestedNameColumn: string | undefined;
+
+    for (const header of headers) {
+      if (columnInfo[header]?.type === 'phone' && !suggestedPhoneColumn) {
+        suggestedPhoneColumn = header;
+      }
+      if (columnInfo[header]?.type === 'name' && !suggestedNameColumn) {
+        suggestedNameColumn = header;
+      }
+    }
+
     return {
       columns: headers,
       columnInfo,
       rowCount: rows.length,
       fileName,
+      records,
+      suggestedPhoneColumn,
+      suggestedNameColumn,
     };
   } catch (error) {
     if (error instanceof Error) {

@@ -505,7 +505,7 @@ class Database {
 
   private async syncItem(item: SyncLog): Promise<void> {
     const { data: { user } } = await supabase.auth.getUser();
-    if (!user) throw new Error('Not authenticated');
+    if (!user) return;
 
     switch (item.table_name) {
       case 'templates':

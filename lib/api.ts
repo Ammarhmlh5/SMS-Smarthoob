@@ -3,7 +3,7 @@
  * Connects phone app to Python backend instead of Edge Functions
  */
 
-const API_BASE_URL = 'http://10.0.2.2:8000'; // Android emulator localhost
+let API_BASE_URL = 'http://10.0.2.2:8000'; // Android emulator localhost / change in settings
 // const API_BASE_URL = 'http://localhost:8000'; // iOS simulator
 // const API_BASE_URL = 'http://192.168.1.x:8000'; // Physical device - change IP
 
@@ -31,6 +31,9 @@ export interface DocumentAnalysis {
     confidence: number;
   }[];
   rowCount: number;
+  sampleData?: Record<string, string>[];
+  suggestedPhoneColumn?: string;
+  suggestedNameColumn?: string;
 }
 
 export interface VariableLink {
@@ -164,6 +167,9 @@ export async function parseDocument(
       confidence: f.confidence,
     })),
     rowCount: data.row_count || 0,
+    sampleData: data.sample_data,
+    suggestedPhoneColumn: data.suggested_phone_column,
+    suggestedNameColumn: data.suggested_name_column,
   };
 }
 
@@ -271,6 +277,10 @@ export async function getSettings(userId: string): Promise<{ batch_size: number;
 // Export base URL for configuration
 // =====================
 
+export function getApiBaseUrl(): string {
+  return API_BASE_URL;
+}
+
 export function setApiBaseUrl(url: string) {
-  (API_BASE_URL as any) = url;
+  API_BASE_URL = url.trim().replace(/\/+$/, '');
 }
