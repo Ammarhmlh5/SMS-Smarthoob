@@ -32,13 +32,14 @@ export type VariableMapping = {
 
 export async function pickDocument(): Promise<{ uri: string; name: string } | null> {
   try {
-    // Use more general types to ensure picker works on all platforms
+    // Try native picker first
     const result = await DocumentPicker.getDocumentAsync({
-      type: ['text/csv', 'text/comma-separated-values', 'application/octet-stream', '*/*'],
+      type: [DocumentPicker.types.allFiles],
       copyToCacheDirectory: true,
+      mode: 'open',
     });
 
-    console.log('Document picker result:', result);
+    console.log('Document picker result:', JSON.stringify(result, null, 2));
 
     if (result.canceled) {
       console.log('Picker canceled');
@@ -53,14 +54,53 @@ export async function pickDocument(): Promise<{ uri: string; name: string } | nu
     const asset = result.assets[0];
     console.log('Selected file:', asset.name, asset.uri);
     
+    if (!asset.uri) {
+      throw new Error('لم يتم الحصول على رابط الملف');
+    }
+    
     return {
       uri: asset.uri,
-      name: asset.name,
+      name: asset.name || 'document',
     };
   } catch (error) {
     console.error('Error picking document:', error);
+    // Try web fallback
+    if (typeof window !== 'undefined') {
+      return pickDocumentWeb();
+    }
     throw new Error('تعذر اختيار الملف: ' + (error as Error).message);
   }
+}
+
+// Web fallback using browser file input
+async function pickDocumentWeb(): Promise<{ uri: string; name: string } | null> {
+  return new Promise((resolve) => {
+    const input = document.createElement('input');
+    input.type = 'file';
+    input.accept = '.csv,.xlsx,.xls,.txt';
+    
+    input.onchange = async (e) => {
+      const file = (e.target as HTMLInputElement).files?.[0];
+      if (file) {
+        const reader = new FileReader();
+        reader.onload = () => {
+          resolve({
+            uri: reader.result as string,
+            name: file.name,
+          });
+        };
+        reader.onerror = () => {
+          resolve(null);
+        };
+        reader.readAsDataURL(file);
+      } else {
+        resolve(null);
+      }
+    };
+    
+    input.onerror = () => resolve(null);
+    input.click();
+  });
 }
 
 // =====================
@@ -179,8 +219,24 @@ function analyzeColumn(name: string, values: string[]): ColumnInfo {
 
 export async function parseDocumentFile(uri: string, fileName: string): Promise<DocumentAnalysis> {
   try {
-    const content = await FileSystem.readAsStringAsync(uri);
+    console.log('parseDocumentFile called with:', uri, fileName);
+    
+    let content: string;
+    
+    // Check if it's a data URL (web) or file URI (native)
+    if (uri.startsWith('data:')) {
+      // Web: Extract content from data URL
+      const base64 = uri.split(',')[1];
+      content = atob(base64);
+      console.log('Parsed web data URL');
+    } else {
+      // Native: Read from file system
+      content = await FileSystem.readAsStringAsync(uri);
+      console.log('Read file from filesystem, length:', content.length);
+    }
+    
     const { headers, rows } = parseCSV(content);
+    console.log('CSV parsed - headers:', headers, 'rows:', rows.length);
     
     if (headers.length === 0) {
       throw new Error('الملف فارغ أو غير صالح');
