@@ -9,6 +9,7 @@ import { FileSpreadsheet, Upload, Check, X, ArrowRight, RefreshCw } from 'lucide
 import { colors, fonts, spacing } from '@/constants/theme';
 import { 
   pickDocument, 
+  parseDocumentFile,
   suggestMapping, 
   getSampleRecords,
   type DocumentAnalysis, 
@@ -55,49 +56,75 @@ export function DocumentImportModal({ variables, onMapped, onCancel }: Props) {
         return;
       }
 
-      // For native app, convert URI to File
-      const file = await uriToFile(result.uri, result.name);
-      
-      // Get user ID from auth
-      const userId = 'test-user'; // In real app, get from useAuth()
-      
-      // Upload to backend API for parsing (supports PDF, CSV, Excel)
-      const parsed = await parseDocument(file, userId);
-      
-      // Transform API response to frontend format
-      const transformedDoc: DocumentAnalysis = {
-        columns: parsed.columns,
-        columnInfo: {},
-        rowCount: parsed.rowCount,
-        fileName: parsed.columns.join(', '), // Use columns as filename
-      };
-      
-      // Create columnInfo from detected columns
-      if (parsed.detectedColumns) {
-        for (const col of parsed.detectedColumns) {
-          transformedDoc.columnInfo[col.name] = {
-            name: col.name,
-            type: col.type as any,
-            confidence: col.confidence,
-            sampleValues: [],
+      const userId = 'test-user';
+      let transformedDoc: DocumentAnalysis | null = null;
+
+      // Determine MIME type
+      const lowerName = result.name.toLowerCase();
+      const mimeType = lowerName.endsWith('.pdf')
+        ? 'application/pdf'
+        : lowerName.endsWith('.xlsx')
+        ? 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet'
+        : lowerName.endsWith('.xls')
+        ? 'application/vnd.ms-excel'
+        : 'text/csv';
+
+      // Attempt parsing via backend API first (supports PDF, Excel, AI analysis)
+      try {
+        let uploadFile: any;
+        if (typeof window !== 'undefined' && typeof File !== 'undefined' && (result as any).file instanceof File) {
+          uploadFile = (result as any).file;
+        } else if (result.uri.startsWith('data:') && typeof window !== 'undefined' && typeof File !== 'undefined') {
+          const response = await fetch(result.uri);
+          const blob = await response.blob();
+          uploadFile = new File([blob], result.name, { type: blob.type || mimeType });
+        } else {
+          // Native FormData payload
+          uploadFile = {
+            uri: result.uri,
+            name: result.name,
+            type: mimeType,
           };
         }
+
+        const parsed = await parseDocument(uploadFile, userId);
+
+        transformedDoc = {
+          columns: parsed.columns,
+          columnInfo: {},
+          rowCount: parsed.rowCount,
+          fileName: result.name,
+        };
+
+        if (parsed.detectedColumns) {
+          for (const col of parsed.detectedColumns) {
+            transformedDoc.columnInfo[col.name] = {
+              name: col.name,
+              type: col.type as any,
+              confidence: col.confidence,
+              sampleValues: [],
+            };
+          }
+        }
+      } catch (apiErr) {
+        console.warn('Backend parsing unavailable, checking local parser:', apiErr);
+        // Fallback to local file parser if it's CSV
+        if (!lowerName.endsWith('.pdf') && !lowerName.endsWith('.xlsx') && !lowerName.endsWith('.xls')) {
+          transformedDoc = await parseDocumentFile(result.uri, result.name);
+        } else {
+          throw apiErr;
+        }
       }
-      
-      setDocument(transformedDoc);
-      setStep('mapping');
+
+      if (transformedDoc) {
+        setDocument(transformedDoc);
+        setStep('mapping');
+      }
     } catch (err) {
       setError(err instanceof Error ? err.message : 'تعذر تحليل الملف');
     } finally {
       setLoading(false);
     }
-  };
-
-  // Helper to convert URI to File for native
-  const uriToFile = async (uri: string, name: string): Promise<File> => {
-    const response = await fetch(uri);
-    const blob = await response.blob();
-    return new File([blob], name, { type: blob.type });
   };
 
   const handleMappingChange = (variable: string, column: string) => {

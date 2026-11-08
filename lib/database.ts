@@ -287,7 +287,7 @@ class Database {
     const now = new Date().toISOString();
     await this.db!.runAsync(
       'UPDATE templates SET title = COALESCE(?, title), body = COALESCE(?, body), updated_at = ?, sync_status = ? WHERE id = ?',
-      [updates.title, updates.body, now, 'pending', id]
+      [updates.title ?? null, updates.body ?? null, now, 'pending', id]
     );
 
     await this.logSync('templates', id, 'update');
@@ -351,7 +351,7 @@ class Database {
     const now = new Date().toISOString();
     await this.db!.runAsync(
       'UPDATE campaigns SET status = ?, sent_count = COALESCE(?, sent_count), failed_count = COALESCE(?, failed_count), updated_at = ?, sync_status = ? WHERE id = ?',
-      [status, sentCount, failedCount, now, 'pending', id]
+      [status, sentCount ?? null, failedCount ?? null, now, 'pending', id]
     );
 
     await this.logSync('campaigns', id, 'update');

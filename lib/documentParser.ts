@@ -35,14 +35,13 @@ export async function pickDocument(): Promise<{ uri: string; name: string } | nu
     // Try native picker first - supports CSV, Excel, and PDF
     const result = await DocumentPicker.getDocumentAsync({
       type: [
-        DocumentPicker.types.allFiles,
+        '*/*',
         'application/pdf',
         'text/csv',
         'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
         'application/vnd.ms-excel',
       ],
       copyToCacheDirectory: true,
-      mode: 'open',
     });
 
     console.log('Document picker result:', JSON.stringify(result, null, 2));

@@ -129,12 +129,16 @@ export async function getTemplateVariables(templateId: string): Promise<{ variab
 // Document Processing
 // =====================
 
+export type UploadableFile =
+  | File
+  | { uri: string; name: string; type?: string };
+
 export async function parseDocument(
-  file: File,
+  file: UploadableFile,
   userId: string
 ): Promise<DocumentAnalysis> {
   const formData = new FormData();
-  formData.append('file', file);
+  formData.append('file', file as any);
 
   const response = await fetch(`${API_BASE_URL}/api/v1/documents/parse`, {
     method: 'POST',
