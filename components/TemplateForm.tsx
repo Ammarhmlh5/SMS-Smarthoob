@@ -1,7 +1,8 @@
 import { useState } from 'react';
-import { ActivityIndicator, Pressable, StyleSheet, Text, TextInput, View } from 'react-native';
-import { MessageSquare, Type, X } from 'lucide-react-native';
+import { ActivityIndicator, Modal, Pressable, StyleSheet, Text, TextInput, View } from 'react-native';
+import { MessageSquare, Type, X, FileSpreadsheet } from 'lucide-react-native';
 import { Field, formStyles as styles } from '@/components/FormField';
+import { DocumentImportModal } from '@/components/DocumentImportModal';
 import { createTemplate, updateTemplate, extractPlaceholders } from '@/lib/templates';
 import type { MessageTemplate } from '@/lib/templates';
 import { colors, fonts, spacing } from '@/constants/theme';
@@ -11,7 +12,7 @@ const MAX_BODY = 1000;
 
 type TemplateFormProps = {
   template: MessageTemplate | null;
-  onSaved: (template: MessageTemplate) => void;
+  onSaved: (template: MessageTemplate, mapping?: Record<string, string>) => void;
   onCancel: () => void;
 };
 
@@ -29,6 +30,10 @@ export function TemplateForm({ template, onSaved, onCancel }: TemplateFormProps)
   const [body, setBody] = useState(template?.body ?? '');
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const [showImportModal, setShowImportModal] = useState(false);
+  const [columnMapping, setColumnMapping] = useState<Record<string, string>>({});
+  
+  const placeholders = extractPlaceholders(body);
 
   const changeField = (setter: (value: string) => void) => (value: string) => {
     setter(value);
@@ -49,7 +54,7 @@ export function TemplateForm({ template, onSaved, onCancel }: TemplateFormProps)
       const saved = template
         ? await updateTemplate(template.id, input)
         : await createTemplate(input);
-      onSaved(saved);
+      onSaved(saved, columnMapping);
     } catch (err) {
       setError(err instanceof Error ? err.message : 'تعذر حفظ القالب. حاول مرة أخرى.');
     } finally {
@@ -57,7 +62,11 @@ export function TemplateForm({ template, onSaved, onCancel }: TemplateFormProps)
     }
   };
 
-  const placeholders = extractPlaceholders(body);
+  const handleMappingComplete = (mapping: Record<string, string>) => {
+    setColumnMapping(mapping);
+    setShowImportModal(false);
+  };
+
   const remaining = MAX_BODY - body.length;
 
   return (
@@ -91,7 +100,7 @@ export function TemplateForm({ template, onSaved, onCancel }: TemplateFormProps)
         <TextInput
           value={body}
           onChangeText={changeField(setBody)}
-          placeholder="مرحباً {{name}}، فاتورتك بقيمة {{amount}} ريال. شكراً لك."
+          placeholder="مرحباً {{الاسم}}، فاتورتك بقيمة {{المبلغ}} ريال. شكراً لك."
           placeholderTextColor={colors.neutral[400]}
           maxLength={MAX_BODY}
           editable={!saving}
@@ -102,15 +111,30 @@ export function TemplateForm({ template, onSaved, onCancel }: TemplateFormProps)
       </Field>
 
       {placeholders.length > 0 ? (
-        <View style={localStyles.placeholdersRow}>
-          <Text style={localStyles.placeholdersLabel}>المتغيرات:</Text>
-          <View style={localStyles.placeholdersList}>
-            {placeholders.map((ph) => (
-              <View key={ph} style={localStyles.placeholderChip}>
-                <Text style={localStyles.placeholderText}>{`{{${ph}}}`}</Text>
-              </View>
-            ))}
+        <View style={localStyles.placeholdersSection}>
+          <View style={localStyles.placeholdersRow}>
+            <Text style={localStyles.placeholdersLabel}>المتغيرات:</Text>
+            <View style={localStyles.placeholdersList}>
+              {placeholders.map((ph) => (
+                <View key={ph} style={localStyles.placeholderChip}>
+                  <Text style={localStyles.placeholderText}>{`{{${ph}}}`}</Text>
+                  {columnMapping[ph] && (
+                    <View style={localStyles.mappedBadge}>
+                      <Text style={localStyles.mappedBadgeText}>{columnMapping[ph]}</Text>
+                    </View>
+                  )}
+                </View>
+              ))}
+            </View>
           </View>
+          
+          <Pressable
+            onPress={() => setShowImportModal(true)}
+            style={({ pressed }) => [localStyles.importButton, pressed && styles.pressed]}
+          >
+            <FileSpreadsheet size={16} color={colors.primary[700]} strokeWidth={2} />
+            <Text style={localStyles.importButtonText}>استيراد بيانات وربط المتغيرات</Text>
+          </Pressable>
         </View>
       ) : null}
 
@@ -129,6 +153,21 @@ export function TemplateForm({ template, onSaved, onCancel }: TemplateFormProps)
           <Text style={styles.saveText}>{isEdit ? 'حفظ التعديلات' : 'حفظ القالب'}</Text>
         )}
       </Pressable>
+
+      <Modal
+        visible={showImportModal}
+        animationType="slide"
+        transparent
+        onRequestClose={() => setShowImportModal(false)}
+      >
+        <View style={localStyles.modalOverlay}>
+          <DocumentImportModal
+            variables={placeholders}
+            onMapped={handleMappingComplete}
+            onCancel={() => setShowImportModal(false)}
+          />
+        </View>
+      </Modal>
     </View>
   );
 }
@@ -148,6 +187,9 @@ const localStyles = StyleSheet.create({
     textAlign: 'right',
     writingDirection: 'rtl',
   },
+  placeholdersSection: {
+    gap: spacing.sm,
+  },
   placeholdersRow: {
     gap: spacing.xs / 2,
   },
@@ -164,11 +206,14 @@ const localStyles = StyleSheet.create({
     gap: spacing.xs / 2,
   },
   placeholderChip: {
+    flexDirection: 'row-reverse',
+    alignItems: 'center',
+    gap: spacing.xs / 2,
     backgroundColor: colors.primary[50],
     borderWidth: 1,
     borderColor: colors.primary[200],
     borderRadius: 10,
-    paddingHorizontal: spacing.xs / 2,
+    paddingHorizontal: spacing.sm,
     paddingVertical: 4,
   },
   placeholderText: {
@@ -176,5 +221,46 @@ const localStyles = StyleSheet.create({
     fontSize: 13,
     color: colors.primary[700],
     writingDirection: 'ltr',
+  },
+  mappedBadge: {
+    backgroundColor: colors.success[100],
+    paddingHorizontal: spacing.xs / 2,
+    paddingVertical: 2,
+    borderRadius: 6,
+  },
+  mappedBadgeText: {
+    fontFamily: fonts.semibold,
+    fontSize: 10,
+    color: colors.success[700],
+  },
+  importButton: {
+    flexDirection: 'row-reverse',
+    alignItems: 'center',
+    justifyContent: 'center',
+    gap: spacing.xs / 2,
+    height: 40,
+    borderRadius: 10,
+    borderWidth: 1,
+    borderStyle: 'dashed',
+    borderColor: colors.primary[300],
+    backgroundColor: colors.primary[50],
+  },
+  importButtonText: {
+    fontFamily: fonts.semibold,
+    fontSize: 13,
+    color: colors.primary[700],
+  },
+  modalOverlay: {
+    flex: 1,
+    backgroundColor: 'rgba(0, 0, 0, 0.5)',
+    justifyContent: 'center',
+    alignItems: 'center',
+    padding: spacing.md,
+  },
+  pressed: {
+    opacity: 0.8,
+  },
+  disabled: {
+    opacity: 0.6,
   },
 });

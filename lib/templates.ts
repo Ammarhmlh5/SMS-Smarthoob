@@ -65,7 +65,8 @@ export async function deleteTemplate(id: string): Promise<void> {
 }
 
 export function extractPlaceholders(body: string): string[] {
-  const matches = body.matchAll(/\{\{\s*(\w+)\s*\}\}/g);
+  // Support both English and Arabic variables: {{name}} or {{الاسم}}
+  const matches = body.matchAll(/\{\{\s*([\w\u0600-\u06FF\u0750-\u077F]+)\s*\}\}/g);
   const seen = new Set<string>();
   const result: string[] = [];
   for (const match of matches) {
