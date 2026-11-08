@@ -149,7 +149,18 @@ export async function parseDocument(
   }
 
   const result = await response.json();
-  return result.data;
+  const data = result.data;
+  
+  // Transform backend response to frontend format
+  return {
+    columns: data.columns || [],
+    detectedColumns: (data.detected_fields || []).map((f: any) => ({
+      name: f.column_name,
+      type: f.detected_type,
+      confidence: f.confidence,
+    })),
+    rowCount: data.row_count || 0,
+  };
 }
 
 // =====================

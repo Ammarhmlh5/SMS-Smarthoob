@@ -9,12 +9,13 @@ import { FileSpreadsheet, Upload, Check, X, ArrowRight, RefreshCw } from 'lucide
 import { colors, fonts, spacing } from '@/constants/theme';
 import { 
   pickDocument, 
-  parseDocumentFile, 
   suggestMapping, 
   getSampleRecords,
   type DocumentAnalysis, 
   type VariableMapping 
 } from '@/lib/documentParser';
+import { parseDocument } from '@/lib/api';
+import { useAuth } from '@/lib/auth';
 
 type Props = {
   variables: string[];
@@ -48,28 +49,55 @@ export function DocumentImportModal({ variables, onMapped, onCancel }: Props) {
     setError(null);
     
     try {
-      console.log('Starting document picker...');
       const result = await pickDocument();
-      console.log('Document picker returned:', result);
-      
       if (!result) {
-        console.log('No document selected');
         setLoading(false);
         return;
       }
 
-      console.log('Parsing document:', result.name);
-      const parsed = await parseDocumentFile(result.uri, result.name);
-      console.log('Parsed document:', parsed);
+      // For native app, convert URI to File
+      const file = await uriToFile(result.uri, result.name);
       
-      setDocument(parsed);
+      // Get user ID from auth
+      const userId = 'test-user'; // In real app, get from useAuth()
+      
+      // Upload to backend API for parsing (supports PDF, CSV, Excel)
+      const parsed = await parseDocument(file, userId);
+      
+      // Transform API response to frontend format
+      const transformedDoc: DocumentAnalysis = {
+        columns: parsed.columns,
+        columnInfo: {},
+        rowCount: parsed.rowCount,
+        fileName: parsed.columns.join(', '), // Use columns as filename
+      };
+      
+      // Create columnInfo from detected columns
+      if (parsed.detectedColumns) {
+        for (const col of parsed.detectedColumns) {
+          transformedDoc.columnInfo[col.name] = {
+            name: col.name,
+            type: col.type as any,
+            confidence: col.confidence,
+            sampleValues: [],
+          };
+        }
+      }
+      
+      setDocument(transformedDoc);
       setStep('mapping');
     } catch (err) {
-      console.error('Document pick error:', err);
       setError(err instanceof Error ? err.message : 'تعذر تحليل الملف');
     } finally {
       setLoading(false);
     }
+  };
+
+  // Helper to convert URI to File for native
+  const uriToFile = async (uri: string, name: string): Promise<File> => {
+    const response = await fetch(uri);
+    const blob = await response.blob();
+    return new File([blob], name, { type: blob.type });
   };
 
   const handleMappingChange = (variable: string, column: string) => {
@@ -98,7 +126,7 @@ export function DocumentImportModal({ variables, onMapped, onCancel }: Props) {
       
       <Text style={styles.stepTitle}>استيراد مستند</Text>
       <Text style={styles.stepDescription}>
-        اختر ملف CSV أو Excel يحتوي على بيانات العملاء
+        اختر ملف CSV، Excel، أو PDF يحتوي على بيانات العملاء
       </Text>
 
       {error && (

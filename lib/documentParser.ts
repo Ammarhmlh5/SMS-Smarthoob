@@ -32,9 +32,15 @@ export type VariableMapping = {
 
 export async function pickDocument(): Promise<{ uri: string; name: string } | null> {
   try {
-    // Try native picker first
+    // Try native picker first - supports CSV, Excel, and PDF
     const result = await DocumentPicker.getDocumentAsync({
-      type: [DocumentPicker.types.allFiles],
+      type: [
+        DocumentPicker.types.allFiles,
+        'application/pdf',
+        'text/csv',
+        'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
+        'application/vnd.ms-excel',
+      ],
       copyToCacheDirectory: true,
       mode: 'open',
     });
@@ -77,7 +83,7 @@ async function pickDocumentWeb(): Promise<{ uri: string; name: string } | null> 
   return new Promise((resolve) => {
     const input = document.createElement('input');
     input.type = 'file';
-    input.accept = '.csv,.xlsx,.xls,.txt';
+    input.accept = '.csv,.xlsx,.xls,.pdf,application/pdf';
     
     input.onchange = async (e) => {
       const file = (e.target as HTMLInputElement).files?.[0];
