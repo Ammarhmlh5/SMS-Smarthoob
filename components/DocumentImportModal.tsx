@@ -48,16 +48,24 @@ export function DocumentImportModal({ variables, onMapped, onCancel }: Props) {
     setError(null);
     
     try {
+      console.log('Starting document picker...');
       const result = await pickDocument();
+      console.log('Document picker returned:', result);
+      
       if (!result) {
+        console.log('No document selected');
         setLoading(false);
         return;
       }
 
+      console.log('Parsing document:', result.name);
       const parsed = await parseDocumentFile(result.uri, result.name);
+      console.log('Parsed document:', parsed);
+      
       setDocument(parsed);
       setStep('mapping');
     } catch (err) {
+      console.error('Document pick error:', err);
       setError(err instanceof Error ? err.message : 'تعذر تحليل الملف');
     } finally {
       setLoading(false);

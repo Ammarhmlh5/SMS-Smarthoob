@@ -32,23 +32,34 @@ export type VariableMapping = {
 
 export async function pickDocument(): Promise<{ uri: string; name: string } | null> {
   try {
+    // Use more general types to ensure picker works on all platforms
     const result = await DocumentPicker.getDocumentAsync({
-      type: ['text/csv', 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet', 'text/comma-separated-values'],
+      type: ['text/csv', 'text/comma-separated-values', 'application/octet-stream', '*/*'],
       copyToCacheDirectory: true,
     });
 
-    if (result.canceled || !result.assets || result.assets.length === 0) {
+    console.log('Document picker result:', result);
+
+    if (result.canceled) {
+      console.log('Picker canceled');
+      return null;
+    }
+
+    if (!result.assets || result.assets.length === 0) {
+      console.log('No assets selected');
       return null;
     }
 
     const asset = result.assets[0];
+    console.log('Selected file:', asset.name, asset.uri);
+    
     return {
       uri: asset.uri,
       name: asset.name,
     };
   } catch (error) {
     console.error('Error picking document:', error);
-    throw new Error('تعذر اختيار الملف');
+    throw new Error('تعذر اختيار الملف: ' + (error as Error).message);
   }
 }
 
