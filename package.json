@@ -7,7 +7,8 @@
     "dev": "EXPO_NO_TELEMETRY=1 expo start",
     "build:web": "expo export --platform web",
     "lint": "expo lint",
-    "typecheck": "tsc --noEmit"
+    "typecheck": "tsc --noEmit",
+    "test": "node --experimental-strip-types tests/delivery-safety.test.ts"
   },
   "dependencies": {
     "@expo-google-fonts/cairo": "^0.4.2",
