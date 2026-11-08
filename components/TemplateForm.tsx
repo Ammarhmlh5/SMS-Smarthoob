@@ -183,7 +183,7 @@ export function TemplateForm({ template, initialValues, onSaved, onCancel }: Tem
           
           <Pressable
             onPress={() => setShowImportModal(true)}
-            style={({ pressed }) => [localStyles.importButton, pressed && styles.pressed]}
+            style={({ pressed }) => [localStyles.dataImportButton, pressed && styles.pressed]}
           >
             <FileSpreadsheet size={16} color={colors.primary[700]} strokeWidth={2} />
             <Text style={localStyles.importButtonText}>استيراد بيانات وربط المتغيرات</Text>
@@ -304,7 +304,7 @@ const localStyles = StyleSheet.create({
     fontSize: 10,
     color: colors.success[700],
   },
-  importButton: {
+  dataImportButton: {
     flexDirection: 'row-reverse',
     alignItems: 'center',
     justifyContent: 'center',
