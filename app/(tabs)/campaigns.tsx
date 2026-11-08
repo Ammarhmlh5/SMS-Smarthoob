@@ -37,6 +37,7 @@ import {
   sendCampaign,
 } from '@/lib/campaigns';
 import type { Campaign, Subscriber } from '@/lib/campaigns';
+import { evaluateSendGate } from '@/lib/sendGuard';
 import type { DocumentAnalysis } from '@/lib/documentParser';
 import { colors, fonts, spacing } from '@/constants/theme';
 
@@ -214,6 +215,16 @@ export default function CampaignsScreen() {
   };
 
   const handleSend = async () => {
+    // 1. التحقق عبر Send Gate أولاً
+    const gate = await evaluateSendGate({
+      connectionId: selectedConnection,
+      recipientsCount: subscribers.length,
+    });
+    if (!gate.canProceed) {
+      setSendError(gate.message);
+      return;
+    }
+
     setStep('sending');
     setSendError(null);
     try {
