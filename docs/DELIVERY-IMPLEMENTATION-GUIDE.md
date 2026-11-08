@@ -17,7 +17,7 @@
 
 ## 2. مكونات التنفيذ
 
-### 2.1 AppSettingsStore (AsyncStorage)
+### 2.1 settingsStore (AsyncStorage)
 
 المسؤولية:
 - قراءة عنوان FastAPI المُعدّ من `AsyncStorage`
@@ -37,7 +37,7 @@ export interface AppSettings {
 }
 ```
 
-### 2.2 GatewayKeyStore (SecureStore)
+### 2.2 gatewayKeyStore (expo-secure-store)
 
 المسؤولية:
 - تخزين بيانات البوابة بشكل مشفّر باستخدام `expo-secure-store`
@@ -61,7 +61,7 @@ export async function getGatewayCredential(gatewayId: string): Promise<string | 
 - قراءة `Retry-After` من الاستجابة
 - إرجاع نتيجة الإرسال مع حالة كل مستلم
 
-### 2.4 RequestThrottlePolicy
+### 2.4 throttlePolicy (lib/throttlePolicy.ts)
 
 المسؤولية:
 - حساب التأخير بين الطلبات
@@ -399,7 +399,7 @@ await AsyncStorage.setItem('enable_remote_send', 'false');
 
 ### Sprint 2 — ربط الإعدادات
 - ربط `AppSettings` بـ `AsyncStorage`
-- تطبيق `RequestThrottlePolicy`
+- تطبيق `lib/throttlePolicy.ts`
 - إضافة flow إعادة المحاولة
 
 ### Sprint 3 — طبقة الإرسال
@@ -433,7 +433,7 @@ await AsyncStorage.setItem('enable_remote_send', 'false');
 
 - **حفظ الحملة محلياً** (SQLite)
 - **إعدادات البوابة والاتصال** (AsyncStorage + SecureStore)
-- **throttling وretry** (RequestThrottlePolicy)
+- **throttling وretry** (`lib/throttlePolicy.ts`)
 - **الإرسال الحقيقي** (Supabase Edge Function `hoodhad-send`)
 
 وهي تضمن أن التطبيق لن يبدأ الإرسال الفعلي قبل الحصول على تأكيد الاتصال والبوابة الصالحة.

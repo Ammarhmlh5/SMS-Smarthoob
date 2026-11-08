@@ -59,8 +59,8 @@ flowchart TD
 | --- | --- |
 | Send Gate | حماية كاملة قبل الإرسال |
 | Outgoing Queue (SQLite) | قائمة انتظار محلية للرسائل |
-| RequestThrottlePolicy | سياسة موحدة للتأخير وإعادة المحاولة |
-| RemoteDispatchService | طبقة batch processing للإرسال |
+| `lib/throttlePolicy.ts` | سياسة موحدة للتأخير وإعادة المحاولة |
+| `lib/remoteDispatch.ts` | طبقة batch processing للإرسال |
 | حالة الحملة في UI | عرض pending/sent/failed في الوقت الفعلي |
 | Feature flag / Kill switch | تعطيل الإرسال افتراضياً مع إمكانية التفعيل |
 
@@ -238,7 +238,7 @@ function getEffectiveDelay(
 - قراءة `delayBetweenMs`, `batchSize`, `maxRetryAttempts` من `AsyncStorage`
 - تطبيقها في `lib/remoteDispatch.ts`
 
-#### Task 3.2 — تنفيذ RequestThrottlePolicy
+#### Task 3.2 — تنفيذ `lib/throttlePolicy.ts`
 - تطبيق `calculateDelayMs`
 - تطبيق `backoffDelayMs` بناءً على `retryCount`
 - احترام `Retry-After` من Supabase
@@ -287,7 +287,7 @@ function getEffectiveDelay(
 
 #### Task 6.1 — اختبارات الوحدة
 - `SendGuard`: 5 حالات (approve + 4 blocked)
-- `RequestThrottlePolicy`: تأخير صحيح, backoff صحيح
+- `lib/throttlePolicy.ts`: تأخير صحيح, backoff صحيح
 - `OutgoingQueue`: insert, update, deduplicate
 
 #### Task 6.2 — اختبارات التكامل
