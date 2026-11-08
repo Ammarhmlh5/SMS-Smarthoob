@@ -1,15 +1,43 @@
 import { useState } from 'react';
-import { ActivityIndicator, Modal, Pressable, StyleSheet, Text, TextInput, View } from 'react-native';
-import { FileSpreadsheet, FileUp, MessageSquare, Type, X } from 'lucide-react-native';
+import {
+  ActivityIndicator,
+  Modal,
+  Pressable,
+  StyleSheet,
+  Text,
+  TextInput,
+  View,
+} from 'react-native';
+import { Eye, EyeOff, FileSpreadsheet, FileUp, MessageSquare, Type, X } from 'lucide-react-native';
 import * as DocumentPicker from 'expo-document-picker';
 import { Field, formStyles as styles } from '@/components/FormField';
 import { DocumentImportModal } from '@/components/DocumentImportModal';
-import { createTemplate, updateTemplate, extractPlaceholders } from '@/lib/templates';
+import { createTemplate, updateTemplate, extractPlaceholders, renderMessage } from '@/lib/templates';
 import type { MessageTemplate } from '@/lib/templates';
 import { colors, fonts, spacing } from '@/constants/theme';
 
 const MAX_TITLE = 100;
 const MAX_BODY = 1000;
+
+/** قيم تجريبية افتراضية للمعاينة الحية */
+const SAMPLE_VALUES: Record<string, string> = {
+  الاسم: 'أحمد محمد',
+  اسم_العميل: 'أحمد محمد',
+  العميل: 'أحمد محمد',
+  المبلغ: '١٥٠.٠٠',
+  المبلغ_الإجمالي: '١٨٠.٠٠',
+  رقم_الفاتورة: 'INV-١٠٠١',
+  رقم_الطلب: 'ORD-٥٥٢',
+  التاريخ: new Date().toLocaleDateString('ar-SA'),
+  تاريخ_الاستحقاق: new Date().toLocaleDateString('ar-SA'),
+  الشركة: 'شركة هدهد',
+  الخدمة: 'الاشتراك الشهري',
+  العملة: 'ريال',
+  name: 'Ahmed Mohammed',
+  amount: '150.00',
+  date: new Date().toLocaleDateString('en'),
+  invoice: 'INV-1001',
+};
 
 type TemplateFormProps = {
   template: MessageTemplate | null;
@@ -41,8 +69,14 @@ export function TemplateForm({ template, initialValues, onSaved, onCancel }: Tem
   const [error, setError] = useState<string | null>(null);
   const [showImportModal, setShowImportModal] = useState(false);
   const [columnMapping, setColumnMapping] = useState<Record<string, string>>({});
-  
+  const [showPreview, setShowPreview] = useState(false);
+
   const placeholders = extractPlaceholders(body);
+
+  /** نص المعاينة الحية مع تعويض المتغيرات بقيم تجريبية */
+  const previewText = renderMessage(body, {
+    ...Object.fromEntries(placeholders.map((ph) => [ph, SAMPLE_VALUES[ph] ?? `[${ph}]`])),
+  });
 
   const changeField = (setter: (value: string) => void) => (value: string) => {
     setter(value);
@@ -59,14 +93,8 @@ export function TemplateForm({ template, initialValues, onSaved, onCancel }: Tem
       });
       if (result.canceled) return;
       const text = (await readPickedFile(result.assets[0])).trim();
-      if (text.length === 0) {
-        setError('الملف فارغ.');
-        return;
-      }
-      if (text.length > MAX_BODY) {
-        setError(`محتوى الملف يتجاوز ${MAX_BODY} حرفاً. اختر ملفاً أقصر.`);
-        return;
-      }
+      if (text.length === 0) { setError('الملف فارغ.'); return; }
+      if (text.length > MAX_BODY) { setError(`محتوى الملف يتجاوز ${MAX_BODY} حرفاً. اختر ملفاً أقصر.`); return; }
       setBody(text);
     } catch {
       setError('تعذر قراءة الملف. تأكد من أنه ملف نصي (TXT أو CSV أو Markdown).');
@@ -77,18 +105,12 @@ export function TemplateForm({ template, initialValues, onSaved, onCancel }: Tem
 
   const handleSave = async () => {
     const validationError = validate(title, body);
-    if (validationError) {
-      setError(validationError);
-      return;
-    }
-
+    if (validationError) { setError(validationError); return; }
     setSaving(true);
     setError(null);
     try {
       const input = { title, body };
-      const saved = template
-        ? await updateTemplate(template.id, input)
-        : await createTemplate(input);
+      const saved = template ? await updateTemplate(template.id, input) : await createTemplate(input);
       onSaved(saved, columnMapping);
     } catch (err) {
       setError(err instanceof Error ? err.message : 'تعذر حفظ القالب. حاول مرة أخرى.');
@@ -106,6 +128,7 @@ export function TemplateForm({ template, initialValues, onSaved, onCancel }: Tem
 
   return (
     <View style={styles.form}>
+      {/* رأس النموذج */}
       <View style={styles.labelRow}>
         <Text style={styles.label}>{isEdit ? 'تعديل القالب' : 'قالب جديد'}</Text>
         <Pressable
@@ -119,6 +142,7 @@ export function TemplateForm({ template, initialValues, onSaved, onCancel }: Tem
         </Pressable>
       </View>
 
+      {/* حقل اسم القالب */}
       <Field label="اسم القالب" Icon={Type}>
         <TextInput
           value={title}
@@ -131,7 +155,9 @@ export function TemplateForm({ template, initialValues, onSaved, onCancel }: Tem
         />
       </Field>
 
+      {/* حقل نص الرسالة */}
       <Field label="نص الرسالة" Icon={MessageSquare} hint={`${remaining} حرف متبقٍّ`}>
+        {/* زر استيراد نص */}
         <Pressable
           accessibilityRole="button"
           accessibilityLabel="استيراد نص من ملف"
@@ -150,6 +176,7 @@ export function TemplateForm({ template, initialValues, onSaved, onCancel }: Tem
           )}
           <Text style={localStyles.importText}>استيراد نص من ملف</Text>
         </Pressable>
+
         <TextInput
           value={body}
           onChangeText={changeField(setBody)}
@@ -163,10 +190,38 @@ export function TemplateForm({ template, initialValues, onSaved, onCancel }: Tem
         />
       </Field>
 
+      {/* معاينة حية للرسالة */}
+      {body.trim().length > 0 && (
+        <View style={localStyles.previewSection}>
+          <Pressable
+            onPress={() => setShowPreview((v) => !v)}
+            style={localStyles.previewToggle}
+          >
+            {showPreview ? (
+              <EyeOff size={15} color={colors.primary[600]} strokeWidth={2} />
+            ) : (
+              <Eye size={15} color={colors.primary[600]} strokeWidth={2} />
+            )}
+            <Text style={localStyles.previewToggleText}>
+              {showPreview ? 'إخفاء المعاينة' : 'معاينة الرسالة'}
+            </Text>
+          </Pressable>
+          {showPreview && (
+            <View style={localStyles.previewBox}>
+              <Text style={localStyles.previewText}>{previewText}</Text>
+              <Text style={localStyles.previewHint}>* القيم التجريبية تُستخدم لأغراض المعاينة فقط</Text>
+            </View>
+          )}
+        </View>
+      )}
+
+      {/* شرائح المتغيرات المكتشفة */}
       {placeholders.length > 0 ? (
         <View style={localStyles.placeholdersSection}>
           <View style={localStyles.placeholdersRow}>
-            <Text style={localStyles.placeholdersLabel}>المتغيرات:</Text>
+            <Text style={localStyles.placeholdersLabel}>
+              {`المتغيرات المكتشفة (${placeholders.length}):`}
+            </Text>
             <View style={localStyles.placeholdersList}>
               {placeholders.map((ph) => (
                 <View key={ph} style={localStyles.placeholderChip}>
@@ -180,7 +235,8 @@ export function TemplateForm({ template, initialValues, onSaved, onCancel }: Tem
               ))}
             </View>
           </View>
-          
+
+          {/* زر ربط المتغيرات ببيانات */}
           <Pressable
             onPress={() => setShowImportModal(true)}
             style={({ pressed }) => [localStyles.dataImportButton, pressed && styles.pressed]}
@@ -193,6 +249,7 @@ export function TemplateForm({ template, initialValues, onSaved, onCancel }: Tem
 
       {error ? <Text style={styles.errorText}>{error}</Text> : null}
 
+      {/* زر الحفظ */}
       <Pressable
         accessibilityRole="button"
         accessibilityLabel={isEdit ? 'حفظ التعديلات' : 'حفظ القالب'}
@@ -207,6 +264,7 @@ export function TemplateForm({ template, initialValues, onSaved, onCancel }: Tem
         )}
       </Pressable>
 
+      {/* Modal ربط المتغيرات */}
       <Modal
         visible={showImportModal}
         animationType="slide"
@@ -258,6 +316,52 @@ const localStyles = StyleSheet.create({
     textAlign: 'right',
     writingDirection: 'rtl',
   },
+  /* معاينة الرسالة الحية */
+  previewSection: {
+    gap: spacing.xs / 2,
+  },
+  previewToggle: {
+    flexDirection: 'row-reverse',
+    alignItems: 'center',
+    alignSelf: 'flex-end',
+    gap: 5,
+    paddingHorizontal: spacing.sm,
+    paddingVertical: 7,
+    borderRadius: 10,
+    backgroundColor: colors.primary[50],
+    borderWidth: 1,
+    borderColor: colors.primary[200],
+  },
+  previewToggleText: {
+    fontFamily: fonts.semibold,
+    fontSize: 13,
+    color: colors.primary[700],
+    writingDirection: 'rtl',
+  },
+  previewBox: {
+    backgroundColor: colors.neutral[50],
+    borderWidth: 1,
+    borderColor: colors.neutral[200],
+    borderRadius: 14,
+    padding: spacing.sm,
+    gap: spacing.xs / 2,
+  },
+  previewText: {
+    fontFamily: fonts.regular,
+    fontSize: 14,
+    lineHeight: 24,
+    color: colors.neutral[800],
+    textAlign: 'right',
+    writingDirection: 'rtl',
+  },
+  previewHint: {
+    fontFamily: fonts.regular,
+    fontSize: 11,
+    color: colors.neutral[400],
+    textAlign: 'right',
+    writingDirection: 'rtl',
+  },
+  /* شرائح المتغيرات */
   placeholdersSection: {
     gap: spacing.sm,
   },
@@ -327,11 +431,5 @@ const localStyles = StyleSheet.create({
     justifyContent: 'center',
     alignItems: 'center',
     padding: spacing.md,
-  },
-  pressed: {
-    opacity: 0.8,
-  },
-  disabled: {
-    opacity: 0.6,
   },
 });

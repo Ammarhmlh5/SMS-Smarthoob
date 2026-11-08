@@ -1,13 +1,25 @@
-import { useCallback, useEffect, useState } from 'react';
-import { ActivityIndicator, Pressable, ScrollView, StyleSheet, Text, View } from 'react-native';
+import { useCallback, useEffect, useMemo, useState } from 'react';
+import {
+  ActivityIndicator,
+  Modal,
+  Pressable,
+  ScrollView,
+  StyleSheet,
+  Text,
+  View,
+} from 'react-native';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import { FileText, Plus, RotateCw } from 'lucide-react-native';
 import { EmptyState } from '@/components/EmptyState';
 import { TemplateCard } from '@/components/TemplateCard';
 import { TemplateForm } from '@/components/TemplateForm';
+import { TemplatePreviewModal } from '@/components/TemplatePreviewModal';
 import { fetchTemplates } from '@/lib/templates';
 import type { MessageTemplate } from '@/lib/templates';
 import { colors, fonts, spacing } from '@/constants/theme';
+
+/** فئات التصفية */
+type FilterTab = 'all' | 'default' | 'custom';
 
 type FormState =
   | { mode: 'closed' }
@@ -20,6 +32,8 @@ export default function TemplatesScreen() {
   const [loading, setLoading] = useState(true);
   const [loadError, setLoadError] = useState<string | null>(null);
   const [form, setForm] = useState<FormState>({ mode: 'closed' });
+  const [filterTab, setFilterTab] = useState<FilterTab>('all');
+  const [previewTemplate, setPreviewTemplate] = useState<MessageTemplate | null>(null);
 
   const load = useCallback(async () => {
     setLoading(true);
@@ -33,9 +47,21 @@ export default function TemplatesScreen() {
     }
   }, []);
 
-  useEffect(() => {
-    load();
-  }, [load]);
+  useEffect(() => { load(); }, [load]);
+
+  /** القوالب المصفّاة حسب التبويب المختار */
+  const filtered = useMemo(() => {
+    if (filterTab === 'default') return templates.filter((t) => t.is_default);
+    if (filterTab === 'custom') return templates.filter((t) => !t.is_default);
+    return templates;
+  }, [templates, filterTab]);
+
+  /** إحصاءات التبويبات */
+  const counts = useMemo(() => ({
+    all: templates.length,
+    default: templates.filter((t) => t.is_default).length,
+    custom: templates.filter((t) => !t.is_default).length,
+  }), [templates]);
 
   const handleSaved = (saved: MessageTemplate) => {
     setTemplates((current) => {
@@ -64,82 +90,131 @@ export default function TemplatesScreen() {
     );
   };
 
-  const showEmpty = !loading && !loadError && templates.length === 0 && form.mode === 'closed';
+  const showEmpty = !loading && !loadError && filtered.length === 0;
+  const isFormOpen = form.mode !== 'closed';
 
   return (
-    <ScrollView
-      style={styles.screen}
-      contentContainerStyle={[styles.content, { paddingTop: insets.top + spacing.md, paddingBottom: spacing.lg }]}
-      keyboardShouldPersistTaps="handled"
-    >
-      <View style={styles.header}>
-        <Text style={styles.heading}>القوالب</Text>
-        <Text style={styles.subheading}>أنشئ رسائل جاهزة تستخدمها في حملاتك مع دعم المتغيرات</Text>
+    <View style={styles.screen}>
+      {/* رأس الشاشة */}
+      <View style={[styles.topBar, { paddingTop: insets.top + spacing.sm }]}>
+        <View style={styles.headerText}>
+          <Text style={styles.heading}>القوالب</Text>
+          <Text style={styles.subheading}>أنشئ رسائل جاهزة تستخدمها في حملاتك</Text>
+        </View>
+        <Pressable
+          accessibilityRole="button"
+          accessibilityLabel="إنشاء قالب جديد"
+          onPress={() => setForm({ mode: 'create' })}
+          style={({ pressed }) => [styles.addBtn, pressed && styles.pressed]}
+        >
+          <Plus size={20} color={colors.neutral[0]} strokeWidth={2.5} />
+          <Text style={styles.addBtnText}>قالب جديد</Text>
+        </Pressable>
       </View>
 
+      {/* تبويبات التصفية */}
+      <View style={styles.tabsRow}>
+        {([
+          ['all', 'الكل'],
+          ['default', 'افتراضية'],
+          ['custom', 'مخصصة'],
+        ] as [FilterTab, string][]).map(([key, label]) => (
+          <Pressable
+            key={key}
+            onPress={() => setFilterTab(key)}
+            style={({ pressed }) => [
+              styles.tab,
+              filterTab === key && styles.tabActive,
+              pressed && styles.pressed,
+            ]}
+          >
+            <Text style={[styles.tabText, filterTab === key && styles.tabTextActive]}>
+              {label}
+            </Text>
+            <View style={[styles.tabBadge, filterTab === key && styles.tabBadgeActive]}>
+              <Text style={[styles.tabBadgeText, filterTab === key && styles.tabBadgeTextActive]}>
+                {counts[key]}
+              </Text>
+            </View>
+          </Pressable>
+        ))}
+      </View>
+
+      {/* محتوى الشاشة */}
       {loading ? (
-        <View style={styles.card}>
-          <View style={styles.centered}>
-            <ActivityIndicator color={colors.primary[700]} />
-          </View>
+        <View style={styles.centered}>
+          <ActivityIndicator color={colors.primary[700]} />
+          <Text style={styles.loadingText}>جاري التحميل…</Text>
         </View>
       ) : loadError ? (
-        <View style={styles.card}>
-          <View style={styles.errorBox}>
-            <Text style={styles.errorText}>{loadError}</Text>
-            <Pressable
-              accessibilityRole="button"
-              accessibilityLabel="إعادة المحاولة"
-              onPress={load}
-              style={({ pressed }) => [styles.retryButton, pressed && styles.pressed]}
-            >
-              <RotateCw size={16} color={colors.primary[700]} strokeWidth={2} />
-              <Text style={styles.retryText}>إعادة المحاولة</Text>
-            </Pressable>
-          </View>
+        <View style={styles.centered}>
+          <Text style={styles.errorText}>{loadError}</Text>
+          <Pressable
+            onPress={load}
+            style={({ pressed }) => [styles.retryButton, pressed && styles.pressed]}
+          >
+            <RotateCw size={16} color={colors.primary[700]} strokeWidth={2} />
+            <Text style={styles.retryText}>إعادة المحاولة</Text>
+          </Pressable>
         </View>
       ) : showEmpty ? (
         <View style={styles.emptyWrap}>
           <EmptyState
             Icon={FileText}
-            title="لا توجد قوالب بعد"
-            description="أنشئ قالبك الأول لاستخدامه في إرسال الفواتير"
+            title={filterTab === 'custom' ? 'لا توجد قوالب مخصصة' : 'لا توجد قوالب بعد'}
+            description={
+              filterTab === 'custom'
+                ? 'أنشئ قالبك الأول بالضغط على "قالب جديد"'
+                : 'أنشئ قالبك الأول لاستخدامه في إرسال الفواتير'
+            }
           />
-          <Pressable
-            accessibilityRole="button"
-            accessibilityLabel="إنشاء قالب جديد"
-            onPress={() => setForm({ mode: 'create' })}
-            style={({ pressed }) => [styles.createButton, pressed && styles.pressed]}
-          >
-            <Plus size={18} color={colors.neutral[0]} strokeWidth={2} />
-            <Text style={styles.createText}>إنشاء قالب جديد</Text>
-          </Pressable>
+          {filterTab !== 'default' && (
+            <Pressable
+              accessibilityRole="button"
+              onPress={() => setForm({ mode: 'create' })}
+              style={({ pressed }) => [styles.createButton, pressed && styles.pressed]}
+            >
+              <Plus size={18} color={colors.neutral[0]} strokeWidth={2} />
+              <Text style={styles.createText}>إنشاء قالب جديد</Text>
+            </Pressable>
+          )}
         </View>
       ) : (
-        <>
-          {templates.map((template) => (
+        <ScrollView
+          contentContainerStyle={styles.list}
+          keyboardShouldPersistTaps="handled"
+          showsVerticalScrollIndicator={false}
+        >
+          {filtered.map((template) => (
             <TemplateCard
               key={template.id}
               template={template}
-              disabled={form.mode !== 'closed'}
+              disabled={isFormOpen}
               onEdit={() => setForm({ mode: 'edit', template })}
               onCopy={() => handleCopy(template)}
+              onPreview={() => setPreviewTemplate(template)}
               onDeleted={handleDeleted}
             />
           ))}
+          {/* مساحة سفلية */}
+          <View style={{ height: insets.bottom + spacing.md }} />
+        </ScrollView>
+      )}
 
-          {form.mode === 'closed' ? (
-            <Pressable
-              accessibilityRole="button"
-              accessibilityLabel="إضافة قالب جديد"
-              onPress={() => setForm({ mode: 'create' })}
-              style={({ pressed }) => [styles.addButton, pressed && styles.pressed]}
+      {/* Modal نموذج الإنشاء/التعديل */}
+      <Modal
+        visible={isFormOpen}
+        animationType="slide"
+        transparent
+        onRequestClose={() => setForm({ mode: 'closed' })}
+      >
+        <View style={styles.modalOverlay}>
+          <View style={styles.modalSheet}>
+            <ScrollView
+              keyboardShouldPersistTaps="handled"
+              contentContainerStyle={styles.modalContent}
+              showsVerticalScrollIndicator={false}
             >
-              <Plus size={18} color={colors.primary[700]} strokeWidth={2} />
-              <Text style={styles.addText}>إضافة قالب جديد</Text>
-            </Pressable>
-          ) : (
-            <View style={styles.card}>
               <TemplateForm
                 key={form.mode === 'edit' ? form.template.id : 'create'}
                 template={form.mode === 'edit' ? form.template : null}
@@ -147,11 +222,20 @@ export default function TemplatesScreen() {
                 onSaved={handleSaved}
                 onCancel={() => setForm({ mode: 'closed' })}
               />
-            </View>
-          )}
-        </>
+            </ScrollView>
+          </View>
+        </View>
+      </Modal>
+
+      {/* Modal المعاينة */}
+      {previewTemplate && (
+        <TemplatePreviewModal
+          template={previewTemplate}
+          visible={previewTemplate !== null}
+          onClose={() => setPreviewTemplate(null)}
+        />
       )}
-    </ScrollView>
+    </View>
   );
 }
 
@@ -160,18 +244,25 @@ const styles = StyleSheet.create({
     flex: 1,
     backgroundColor: colors.neutral[50],
   },
-  content: {
-    paddingHorizontal: spacing.sm,
+  topBar: {
+    flexDirection: 'row-reverse',
+    alignItems: 'center',
+    justifyContent: 'space-between',
+    paddingHorizontal: spacing.md,
+    paddingBottom: spacing.sm,
+    backgroundColor: colors.neutral[0],
+    borderBottomWidth: 1,
+    borderBottomColor: colors.neutral[100],
     gap: spacing.sm,
   },
-  header: {
-    gap: spacing.xs / 2,
-    paddingHorizontal: spacing.xs / 2,
-    marginBottom: spacing.xs / 2,
+  headerText: {
+    flex: 1,
+    alignItems: 'flex-end',
+    gap: 2,
   },
   heading: {
     fontFamily: fonts.bold,
-    fontSize: 28,
+    fontSize: 26,
     lineHeight: 34,
     color: colors.neutral[900],
     textAlign: 'right',
@@ -179,34 +270,96 @@ const styles = StyleSheet.create({
   },
   subheading: {
     fontFamily: fonts.regular,
-    fontSize: 15,
-    lineHeight: 24,
+    fontSize: 13,
+    lineHeight: 20,
     color: colors.neutral[500],
     textAlign: 'right',
     writingDirection: 'rtl',
   },
-  card: {
+  addBtn: {
+    flexDirection: 'row-reverse',
+    alignItems: 'center',
+    gap: 5,
+    backgroundColor: colors.primary[700],
+    borderRadius: 12,
+    paddingHorizontal: spacing.sm,
+    height: 42,
+  },
+  addBtnText: {
+    fontFamily: fonts.bold,
+    fontSize: 14,
+    color: colors.neutral[0],
+    writingDirection: 'rtl',
+  },
+  tabsRow: {
+    flexDirection: 'row-reverse',
+    paddingHorizontal: spacing.md,
+    paddingVertical: spacing.sm,
+    gap: spacing.xs,
     backgroundColor: colors.neutral[0],
-    borderRadius: 20,
+  },
+  tab: {
+    flexDirection: 'row-reverse',
+    alignItems: 'center',
+    gap: 5,
+    paddingHorizontal: spacing.sm,
+    height: 36,
+    borderRadius: 10,
     borderWidth: 1,
     borderColor: colors.neutral[200],
-    padding: spacing.sm,
-    gap: spacing.sm,
+    backgroundColor: colors.neutral[0],
+  },
+  tabActive: {
+    borderColor: colors.primary[300],
+    backgroundColor: colors.primary[50],
+  },
+  tabText: {
+    fontFamily: fonts.semibold,
+    fontSize: 13,
+    color: colors.neutral[500],
+    writingDirection: 'rtl',
+  },
+  tabTextActive: {
+    color: colors.primary[700],
+  },
+  tabBadge: {
+    minWidth: 20,
+    height: 20,
+    borderRadius: 10,
+    backgroundColor: colors.neutral[100],
+    alignItems: 'center',
+    justifyContent: 'center',
+    paddingHorizontal: 5,
+  },
+  tabBadgeActive: {
+    backgroundColor: colors.primary[200],
+  },
+  tabBadgeText: {
+    fontFamily: fonts.bold,
+    fontSize: 11,
+    color: colors.neutral[500],
+  },
+  tabBadgeTextActive: {
+    color: colors.primary[800],
   },
   centered: {
-    paddingVertical: spacing.md,
+    flex: 1,
     alignItems: 'center',
-  },
-  errorBox: {
+    justifyContent: 'center',
     gap: spacing.sm,
-    alignItems: 'flex-end',
+    padding: spacing.md,
+  },
+  loadingText: {
+    fontFamily: fonts.regular,
+    fontSize: 14,
+    color: colors.neutral[500],
+    writingDirection: 'rtl',
   },
   errorText: {
     fontFamily: fonts.semibold,
     fontSize: 14,
-    lineHeight: 21,
     color: colors.error[600],
-    textAlign: 'right',
+    textAlign: 'center',
     writingDirection: 'rtl',
   },
   retryButton: {
@@ -214,8 +367,8 @@ const styles = StyleSheet.create({
     alignItems: 'center',
     gap: spacing.xs / 2,
     paddingHorizontal: spacing.sm,
-    height: 40,
-    borderRadius: 12,
+    paddingVertical: 10,
+    borderRadius: 10,
     borderWidth: 1,
     borderColor: colors.primary[200],
     backgroundColor: colors.primary[50],
@@ -227,42 +380,45 @@ const styles = StyleSheet.create({
     writingDirection: 'rtl',
   },
   emptyWrap: {
-    gap: spacing.lg,
+    flex: 1,
+    alignItems: 'center',
+    justifyContent: 'center',
+    gap: spacing.md,
+    padding: spacing.md,
   },
   createButton: {
     flexDirection: 'row-reverse',
     alignItems: 'center',
-    justifyContent: 'center',
-    gap: spacing.xs / 2,
-    height: 52,
-    borderRadius: 14,
+    gap: 6,
     backgroundColor: colors.primary[700],
+    borderRadius: 14,
+    paddingHorizontal: spacing.md,
+    height: 50,
   },
   createText: {
     fontFamily: fonts.bold,
-    fontSize: 16,
+    fontSize: 15,
     color: colors.neutral[0],
     writingDirection: 'rtl',
   },
-  addButton: {
-    flexDirection: 'row-reverse',
-    alignItems: 'center',
-    justifyContent: 'center',
-    gap: spacing.xs / 2,
-    height: 48,
-    borderRadius: 14,
-    borderWidth: 1,
-    borderStyle: 'dashed',
-    borderColor: colors.primary[200],
-    backgroundColor: colors.primary[50],
+  list: {
+    padding: spacing.sm,
+    gap: spacing.sm,
   },
-  addText: {
-    fontFamily: fonts.semibold,
-    fontSize: 15,
-    color: colors.primary[700],
-    writingDirection: 'rtl',
+  pressed: { opacity: 0.8 },
+  modalOverlay: {
+    flex: 1,
+    backgroundColor: 'rgba(0,0,0,0.5)',
+    justifyContent: 'flex-end',
   },
-  pressed: {
-    opacity: 0.8,
+  modalSheet: {
+    backgroundColor: colors.neutral[0],
+    borderTopLeftRadius: 24,
+    borderTopRightRadius: 24,
+    maxHeight: '90%',
+    paddingBottom: 24,
+  },
+  modalContent: {
+    padding: spacing.md,
   },
 });
