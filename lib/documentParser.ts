@@ -153,6 +153,26 @@ function parseCSV(content: string): { headers: string[]; rows: string[][] } {
 // Column Analysis
 // =====================
 
+/**
+ * تحويل الأرقام العربية المشرقية (٠١٢٣٤٥٦٧٨٩) إلى أرقام لاتينية (0123456789)
+ */
+export function normalizeArabicDigits(str: string): string {
+  if (!str) return '';
+  return str.replace(/[٠-٩]/g, (d) => String(d.charCodeAt(0) - 1632));
+}
+
+/**
+ * تطبيع وتنسيق رقم الهاتف الدولي
+ */
+export function normalizePhoneNumber(phone: string): string {
+  if (!phone) return '';
+  let clean = normalizeArabicDigits(phone).replace(/[\s-]/g, '');
+  if (clean.startsWith('00')) {
+    clean = '+' + clean.substring(2);
+  }
+  return clean;
+}
+
 const PHONE_PATTERNS = [
   /^\+?[0-9]{7,15}$/,
   /^00[0-9]{7,15}$/,
@@ -175,11 +195,11 @@ function analyzeColumn(name: string, values: string[]): ColumnInfo {
   let nameIndicators = 0;
 
   for (const value of samples) {
-    const cleanValue = value.replace(/[\s-]/g, '');
-    if (PHONE_PATTERNS.some(p => p.test(cleanValue))) phoneCount++;
+    const cleanValue = normalizePhoneNumber(value);
+    if (PHONE_PATTERNS.some((p) => p.test(cleanValue))) phoneCount++;
     if (EMAIL_PATTERN.test(value)) emailCount++;
-    
-    const numValue = value.replace(/[.,ريال٠-٩$]/g, '').trim();
+
+    const numValue = normalizeArabicDigits(value).replace(/[.,ريال$]/g, '').trim();
     if (/^\d+(\.\d+)?$/.test(numValue)) numberCount++;
     
     const lowerName = name.toLowerCase();
@@ -341,10 +361,21 @@ export function suggestMapping(
         'price': ['amount'],
         'date': ['date'],
         'الاسم': ['name', 'text'],
+        'العميل': ['name', 'text'],
+        'المشترك': ['name', 'text'],
         'الجوال': ['phone', 'text'],
         'الهاتف': ['phone', 'text'],
+        'رقم_الجوال': ['phone', 'text'],
+        'رقم_الهاتف': ['phone', 'text'],
         'المبلغ': ['amount'],
+        'السعر': ['amount'],
+        'القيمة': ['amount'],
         'التاريخ': ['date'],
+        'تاريخ_الاستحقاق': ['date', 'text'],
+        'الوقت': ['date', 'text'],
+        'رقم_الطلب': ['text', 'amount'],
+        'رقم_الفاتورة': ['text', 'amount'],
+        'رقم_التتبع': ['text'],
       };
 
       const types = expectedTypes[variable] || expectedTypes[varLower] || [];
