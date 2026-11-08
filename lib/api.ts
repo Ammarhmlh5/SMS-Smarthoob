@@ -3,9 +3,25 @@
  * Connects phone app to Python backend instead of Edge Functions
  */
 
-let API_BASE_URL = 'http://10.0.2.2:8000'; // Android emulator localhost / change in settings
-// const API_BASE_URL = 'http://localhost:8000'; // iOS simulator
-// const API_BASE_URL = 'http://192.168.1.x:8000'; // Physical device - change IP
+// Dynamic API URL based on environment
+// For Expo Go on device/emulator: use your machine's local IP
+// For web: localhost:8000
+let API_BASE_URL = 'http://10.0.2.2:8000'; // Android emulator - points to host machine
+
+// Function to set API URL based on platform
+export function getApiBaseUrl(): string {
+  // Check if running in web browser
+  if (typeof window !== 'undefined' && window.location.hostname === 'localhost') {
+    return 'http://localhost:8000';
+  }
+  // For mobile, use the emulator IP or configurable IP
+  return API_BASE_URL;
+}
+
+// Allow overriding API URL from outside
+export function setApiBaseUrl(url: string) {
+  API_BASE_URL = url;
+}
 
 // =====================
 // Types

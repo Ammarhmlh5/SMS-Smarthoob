@@ -2,6 +2,7 @@ import { useCallback, useEffect, useState } from 'react';
 import {
   ActivityIndicator,
   Pressable,
+  RefreshControl,
   ScrollView,
   StyleSheet,
   Text,
@@ -10,7 +11,7 @@ import {
 import { useRouter } from 'expo-router';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import {
-  ArrowLeft,
+  AlertTriangle,
   CheckCircle2,
   ChevronLeft,
   ClipboardList,
@@ -23,6 +24,8 @@ import {
   Send,
   Settings,
   Sparkles,
+  TrendingUp,
+  Zap,
 } from 'lucide-react-native';
 import { MenuCard } from '@/components/MenuCard';
 import { database } from '@/lib/database';
@@ -35,6 +38,7 @@ interface DashboardStats {
   totalMessagesSent: number;
   totalTemplates: number;
   pendingSync: number;
+  failedMessages: number;
 }
 
 export default function MainMenuScreen() {
@@ -46,14 +50,19 @@ export default function MainMenuScreen() {
     totalMessagesSent: 0,
     totalTemplates: 0,
     pendingSync: 0,
+    failedMessages: 0,
   });
-  const [recentCampaign, setRecentCampaign] = useState<Campaign | null>(null);
+  const [recentCampaigns, setRecentCampaigns] = useState<Campaign[]>([]);
   const [loading, setLoading] = useState(true);
+  const [refreshing, setRefreshing] = useState(false);
+  const [userEmail, setUserEmail] = useState<string | null>(null);
 
-  const loadDashboard = useCallback(async () => {
+  const loadDashboard = useCallback(async (isRefresh = false) => {
+    if (!isRefresh) setLoading(true);
     try {
       const { data: { user } } = await supabase.auth.getUser();
       const uid = user?.id || 'default';
+      setUserEmail(user?.email ?? null);
 
       const [campaigns, templates, pendingCount] = await Promise.all([
         database.getCampaigns(uid),
@@ -62,140 +71,241 @@ export default function MainMenuScreen() {
       ]);
 
       const sentSum = campaigns.reduce((acc, c) => acc + (c.sent_count || 0), 0);
+      const failedSum = campaigns.reduce((acc, c) => acc + (c.failed_count || 0), 0);
 
       setStats({
         totalCampaigns: campaigns.length,
         totalMessagesSent: sentSum,
         totalTemplates: templates.length,
         pendingSync: pendingCount,
+        failedMessages: failedSum,
       });
 
-      if (campaigns.length > 0) {
-        setRecentCampaign(campaigns[0] as unknown as Campaign);
-      } else {
-        setRecentCampaign(null);
-      }
+      // آخر 3 حملات
+      setRecentCampaigns((campaigns as unknown as Campaign[]).slice(0, 3));
     } catch {
       // Offline fallback: ignore error
     } finally {
       setLoading(false);
+      setRefreshing(false);
     }
   }, []);
 
-  useEffect(() => {
-    loadDashboard();
-  }, [loadDashboard]);
+  useEffect(() => { loadDashboard(); }, [loadDashboard]);
+
+  const onRefresh = () => {
+    setRefreshing(true);
+    loadDashboard(true);
+  };
+
+  const isFirstRun = !loading && stats.totalCampaigns === 0 && stats.totalTemplates === 0;
 
   return (
     <ScrollView
       style={styles.screen}
       contentContainerStyle={[
         styles.content,
-        { paddingTop: insets.top + spacing.md, paddingBottom: spacing.lg },
+        { paddingTop: insets.top + spacing.sm, paddingBottom: spacing.lg + insets.bottom },
       ]}
+      refreshControl={
+        <RefreshControl
+          refreshing={refreshing}
+          onRefresh={onRefresh}
+          tintColor={colors.primary[700]}
+        />
+      }
     >
-      {/* Header */}
+      {/* ───── الترويسة ───── */}
       <View style={styles.header}>
-        <View style={styles.brandRow}>
-          <Sparkles size={16} color={colors.primary[600]} />
-          <Text style={styles.brand}>هدهد الفواتير — Offline-First</Text>
+        <View style={styles.headerTop}>
+          <View style={styles.brandRow}>
+            <Sparkles size={16} color={colors.primary[600]} />
+            <Text style={styles.brand}>هدهد الفواتير</Text>
+          </View>
+          <Pressable
+            onPress={onRefresh}
+            style={({ pressed }) => [styles.refreshBtn, pressed && styles.pressed]}
+            accessibilityRole="button"
+            accessibilityLabel="تحديث البيانات"
+          >
+            <RefreshCw size={18} color={colors.neutral[500]} strokeWidth={2} />
+          </Pressable>
         </View>
-        <Text style={styles.heading}>لوحة التحكم الرئيسية</Text>
-        <Text style={styles.subheading}>متابعة الإرسال وإدارة القوالب واستيراد الفواتير</Text>
+        <Text style={styles.heading}>لوحة التحكم</Text>
+        {userEmail ? (
+          <Text style={styles.subheading}>{userEmail}</Text>
+        ) : (
+          <Text style={styles.subheading}>متابعة الإرسال وإدارة القوالب واستيراد الفواتير</Text>
+        )}
       </View>
 
-      {/* Stats Grid */}
+      {/* ───── Onboarding (أول تشغيل) ───── */}
+      {isFirstRun && (
+        <View style={styles.onboardingCard}>
+          <View style={styles.onboardingIcon}>
+            <Zap size={28} color={colors.primary[700]} strokeWidth={2} />
+          </View>
+          <Text style={styles.onboardingTitle}>مرحباً بك في هدهد الفواتير 👋</Text>
+          <Text style={styles.onboardingDesc}>
+            ابدأ بإنشاء قالب رسالة، ثم أنشئ حملتك الأولى لإرسال الفواتير لعملائك.
+          </Text>
+          <View style={styles.onboardingSteps}>
+            <Pressable
+              onPress={() => router.navigate('/templates')}
+              style={({ pressed }) => [styles.onboardingStep, pressed && styles.pressed]}
+            >
+              <View style={styles.stepNumber}><Text style={styles.stepNumText}>١</Text></View>
+              <Text style={styles.stepText}>أنشئ قالب رسالة</Text>
+              <ChevronLeft size={16} color={colors.primary[600]} />
+            </Pressable>
+            <Pressable
+              onPress={() => router.navigate('/settings')}
+              style={({ pressed }) => [styles.onboardingStep, pressed && styles.pressed]}
+            >
+              <View style={styles.stepNumber}><Text style={styles.stepNumText}>٢</Text></View>
+              <Text style={styles.stepText}>أضف بوابة هدهد في الإعدادات</Text>
+              <ChevronLeft size={16} color={colors.primary[600]} />
+            </Pressable>
+            <Pressable
+              onPress={() => router.navigate('/campaigns')}
+              style={({ pressed }) => [styles.onboardingStep, pressed && styles.pressed]}
+            >
+              <View style={styles.stepNumber}><Text style={styles.stepNumText}>٣</Text></View>
+              <Text style={styles.stepText}>استيراد الفواتير وأرسل حملتك</Text>
+              <ChevronLeft size={16} color={colors.primary[600]} />
+            </Pressable>
+          </View>
+        </View>
+      )}
+
+      {/* ───── شبكة الإحصائيات ───── */}
       <View style={styles.statsGrid}>
-        <View style={styles.statCard}>
+        {/* رسائل مرسلة */}
+        <Pressable
+          onPress={() => router.navigate('/campaigns')}
+          style={({ pressed }) => [styles.statCard, pressed && styles.pressed]}
+        >
           <View style={[styles.statIconWrap, { backgroundColor: colors.primary[50] }]}>
             <Send size={18} color={colors.primary[700]} />
           </View>
-          <Text style={styles.statValue}>{loading ? '…' : stats.totalMessagesSent}</Text>
+          <Text style={styles.statValue}>{loading ? '…' : stats.totalMessagesSent.toLocaleString('ar')}</Text>
           <Text style={styles.statLabel}>رسائل مرسلة</Text>
-        </View>
+        </Pressable>
 
-        <View style={styles.statCard}>
+        {/* حملات */}
+        <Pressable
+          onPress={() => router.navigate('/campaigns')}
+          style={({ pressed }) => [styles.statCard, pressed && styles.pressed]}
+        >
           <View style={[styles.statIconWrap, { backgroundColor: colors.secondary[50] }]}>
-            <Megaphone size={18} color={colors.secondary[700]} />
+            <Megaphone size={18} color={colors.secondary[600]} />
           </View>
           <Text style={styles.statValue}>{loading ? '…' : stats.totalCampaigns}</Text>
           <Text style={styles.statLabel}>حملات منشأة</Text>
-        </View>
+        </Pressable>
 
-        <View style={styles.statCard}>
+        {/* قوالب */}
+        <Pressable
+          onPress={() => router.navigate('/templates')}
+          style={({ pressed }) => [styles.statCard, pressed && styles.pressed]}
+        >
           <View style={[styles.statIconWrap, { backgroundColor: colors.success[50] }]}>
-            <FileText size={18} color={colors.success[700]} />
+            <FileText size={18} color={colors.success[600]} />
           </View>
           <Text style={styles.statValue}>{loading ? '…' : stats.totalTemplates}</Text>
           <Text style={styles.statLabel}>قوالب جاهزة</Text>
-        </View>
+        </Pressable>
 
-        <View style={styles.statCard}>
-          <View
-            style={[
-              styles.statIconWrap,
-              { backgroundColor: stats.pendingSync > 0 ? colors.warning[500] + '20' : colors.neutral[100] },
-            ]}
-          >
-            <Database
-              size={18}
-              color={stats.pendingSync > 0 ? colors.warning[600] : colors.neutral[600]}
-            />
+        {/* سجل المزامنة */}
+        <Pressable
+          onPress={() => router.navigate('/settings')}
+          style={({ pressed }) => [styles.statCard, pressed && styles.pressed]}
+        >
+          <View style={[styles.statIconWrap, {
+            backgroundColor: stats.pendingSync > 0 ? colors.warning[500] + '20' : colors.neutral[100],
+          }]}>
+            <Database size={18} color={stats.pendingSync > 0 ? colors.warning[600] : colors.neutral[500]} />
           </View>
-          <Text
-            style={[
-              styles.statValue,
-              stats.pendingSync > 0 && { color: colors.warning[600], fontSize: 16 },
-            ]}
-          >
-            {loading ? '…' : stats.pendingSync > 0 ? `${stats.pendingSync} معلق` : 'متطابق'}
+          <Text style={[styles.statValue, stats.pendingSync > 0 && { color: colors.warning[600], fontSize: 16 }]}>
+            {loading ? '…' : stats.pendingSync > 0 ? `${stats.pendingSync}` : '✓'}
           </Text>
-          <Text style={styles.statLabel}>سجل المزامنة</Text>
-        </View>
+          <Text style={styles.statLabel}>{stats.pendingSync > 0 ? 'معلق للمزامنة' : 'متطابق'}</Text>
+        </Pressable>
       </View>
 
-      {/* Recent Campaign Highlight (if available) */}
-      {recentCampaign ? (
+      {/* ───── تنبيه الرسائل الفاشلة ───── */}
+      {!loading && stats.failedMessages > 0 && (
+        <Pressable
+          onPress={() => router.navigate('/campaigns')}
+          style={({ pressed }) => [styles.alertCard, pressed && styles.pressed]}
+        >
+          <AlertTriangle size={18} color={colors.error[600]} strokeWidth={2} />
+          <Text style={styles.alertText}>
+            {`${stats.failedMessages} رسالة فاشلة — اضغط لإعادة المحاولة`}
+          </Text>
+          <ChevronLeft size={16} color={colors.error[600]} />
+        </Pressable>
+      )}
+
+      {/* ───── آخر الحملات ───── */}
+      {recentCampaigns.length > 0 && (
         <View style={styles.recentSection}>
           <View style={styles.sectionHeaderRow}>
-            <Layers size={18} color={colors.primary[700]} />
-            <Text style={styles.sectionTitle}>آخر حملة نشطة</Text>
+            <TrendingUp size={17} color={colors.primary[700]} strokeWidth={2} />
+            <Text style={styles.sectionTitle}>آخر الحملات</Text>
+            <Pressable
+              onPress={() => router.navigate('/campaigns')}
+              style={({ pressed }) => [styles.seeAllBtn, pressed && styles.pressed]}
+            >
+              <Text style={styles.seeAllText}>عرض الكل</Text>
+              <ChevronLeft size={14} color={colors.primary[600]} />
+            </Pressable>
           </View>
-          <Pressable
-            accessibilityRole="button"
-            onPress={() => router.navigate('/campaigns')}
-            style={({ pressed }) => [styles.recentCard, pressed && styles.pressed]}
-          >
-            <View style={styles.recentHeader}>
-              <Text style={styles.recentTitle} numberOfLines={1}>
-                {recentCampaign.name}
-              </Text>
-              <View style={styles.recentBadge}>
-                <CheckCircle2 size={13} color={colors.success[600]} />
-                <Text style={styles.recentBadgeText}>
-                  {recentCampaign.sent_count} / {recentCampaign.total_recipients} مرسلة
+
+          {recentCampaigns.map((camp) => (
+            <Pressable
+              key={camp.id}
+              onPress={() => router.navigate('/campaigns')}
+              style={({ pressed }) => [styles.recentCard, pressed && styles.pressed]}
+            >
+              <View style={styles.recentHeader}>
+                <Text style={styles.recentTitle} numberOfLines={1}>{camp.name}</Text>
+                <View style={[
+                  styles.recentBadge,
+                  camp.status === 'completed' && { backgroundColor: colors.success[50] },
+                  camp.status === 'failed' && { backgroundColor: colors.error[50] },
+                  camp.status === 'sending' && { backgroundColor: colors.secondary[50] },
+                ]}>
+                  {camp.status === 'completed' && <CheckCircle2 size={12} color={colors.success[600]} />}
+                  <Text style={[
+                    styles.recentBadgeText,
+                    camp.status === 'completed' && { color: colors.success[700] },
+                    camp.status === 'failed' && { color: colors.error[600] },
+                    camp.status === 'sending' && { color: colors.secondary[600] },
+                  ]}>
+                    {camp.status === 'completed' ? 'مكتملة' :
+                      camp.status === 'failed' ? 'فاشلة' :
+                        camp.status === 'sending' ? 'جارية' : 'مسودة'}
+                  </Text>
+                </View>
+              </View>
+              <View style={styles.recentFooter}>
+                <Text style={styles.recentDate}>
+                  {new Date(camp.created_at).toLocaleDateString('ar', {
+                    year: 'numeric', month: 'short', day: 'numeric',
+                  })}
+                </Text>
+                <Text style={styles.recentStats}>
+                  {camp.sent_count} / {camp.total_recipients} مرسلة
+                  {camp.failed_count > 0 ? ` · ${camp.failed_count} فاشلة` : ''}
                 </Text>
               </View>
-            </View>
-
-            <View style={styles.recentFooter}>
-              <Text style={styles.recentDate}>
-                {new Date(recentCampaign.created_at).toLocaleDateString('ar', {
-                  year: 'numeric',
-                  month: 'short',
-                  day: 'numeric',
-                })}
-              </Text>
-              <View style={styles.recentAction}>
-                <Text style={styles.recentActionText}>عرض التفاصيل</Text>
-                <ChevronLeft size={16} color={colors.primary[700]} />
-              </View>
-            </View>
-          </Pressable>
+            </Pressable>
+          ))}
         </View>
-      ) : null}
+      )}
 
-      {/* Main Feature Navigation Cards */}
+      {/* ───── البطاقات الرئيسية ───── */}
       <View style={styles.sectionHeaderRow}>
         <Text style={styles.sectionTitle}>العمليات الرئيسية</Text>
       </View>
@@ -209,7 +319,7 @@ export default function MainMenuScreen() {
         />
         <MenuCard
           title="إدارة القوالب والرسائل"
-          description="إنشاء وتعديل واستنساخ قوالب الرسائل مع دعم المتغيرات العربية"
+          description="إنشاء وتعديل واستنساخ قوالب الرسائل مع دعم المتغيرات العربية ومعاينة حية"
           Icon={ClipboardList}
           onPress={() => router.navigate('/templates')}
         />
@@ -233,9 +343,17 @@ const styles = StyleSheet.create({
     paddingHorizontal: spacing.sm,
     gap: spacing.md,
   },
+  pressed: { opacity: 0.8 },
+
+  /* ─── الترويسة ─── */
   header: {
-    gap: spacing.xs / 2,
+    gap: 3,
     paddingHorizontal: spacing.xs / 2,
+  },
+  headerTop: {
+    flexDirection: 'row-reverse',
+    alignItems: 'center',
+    justifyContent: 'space-between',
   },
   brandRow: {
     flexDirection: 'row-reverse',
@@ -248,6 +366,14 @@ const styles = StyleSheet.create({
     color: colors.primary[700],
     writingDirection: 'rtl',
   },
+  refreshBtn: {
+    width: 36,
+    height: 36,
+    borderRadius: 10,
+    backgroundColor: colors.neutral[100],
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
   heading: {
     fontFamily: fonts.bold,
     fontSize: 26,
@@ -258,13 +384,83 @@ const styles = StyleSheet.create({
   },
   subheading: {
     fontFamily: fonts.regular,
-    fontSize: 14,
-    lineHeight: 22,
+    fontSize: 13,
+    lineHeight: 20,
     color: colors.neutral[500],
     textAlign: 'right',
     writingDirection: 'rtl',
   },
-  // Stats Grid
+
+  /* ─── Onboarding ─── */
+  onboardingCard: {
+    backgroundColor: colors.primary[50],
+    borderWidth: 1,
+    borderColor: colors.primary[200],
+    borderRadius: 20,
+    padding: spacing.md,
+    gap: spacing.sm,
+    alignItems: 'flex-end',
+  },
+  onboardingIcon: {
+    width: 52,
+    height: 52,
+    borderRadius: 16,
+    backgroundColor: colors.primary[100],
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+  onboardingTitle: {
+    fontFamily: fonts.bold,
+    fontSize: 17,
+    color: colors.neutral[900],
+    textAlign: 'right',
+    writingDirection: 'rtl',
+  },
+  onboardingDesc: {
+    fontFamily: fonts.regular,
+    fontSize: 14,
+    lineHeight: 22,
+    color: colors.neutral[600],
+    textAlign: 'right',
+    writingDirection: 'rtl',
+  },
+  onboardingSteps: {
+    width: '100%',
+    gap: spacing.xs / 2,
+    marginTop: spacing.xs / 2,
+  },
+  onboardingStep: {
+    flexDirection: 'row-reverse',
+    alignItems: 'center',
+    gap: spacing.xs,
+    backgroundColor: colors.neutral[0],
+    borderRadius: 12,
+    padding: spacing.xs,
+    borderWidth: 1,
+    borderColor: colors.primary[200],
+  },
+  stepNumber: {
+    width: 28,
+    height: 28,
+    borderRadius: 14,
+    backgroundColor: colors.primary[700],
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+  stepNumText: {
+    fontFamily: fonts.bold,
+    fontSize: 13,
+    color: colors.neutral[0],
+  },
+  stepText: {
+    flex: 1,
+    fontFamily: fonts.semibold,
+    fontSize: 14,
+    color: colors.neutral[800],
+    writingDirection: 'rtl',
+  },
+
+  /* ─── شبكة الإحصائيات ─── */
   statsGrid: {
     flexDirection: 'row-reverse',
     flexWrap: 'wrap',
@@ -281,16 +477,16 @@ const styles = StyleSheet.create({
     gap: 4,
   },
   statIconWrap: {
-    width: 36,
-    height: 36,
-    borderRadius: 10,
+    width: 38,
+    height: 38,
+    borderRadius: 11,
     alignItems: 'center',
     justifyContent: 'center',
     marginBottom: 4,
   },
   statValue: {
     fontFamily: fonts.bold,
-    fontSize: 22,
+    fontSize: 24,
     color: colors.neutral[900],
   },
   statLabel: {
@@ -299,7 +495,27 @@ const styles = StyleSheet.create({
     color: colors.neutral[500],
     writingDirection: 'rtl',
   },
-  // Recent Campaign
+
+  /* ─── تنبيه الرسائل الفاشلة ─── */
+  alertCard: {
+    flexDirection: 'row-reverse',
+    alignItems: 'center',
+    gap: spacing.xs,
+    backgroundColor: colors.error[50],
+    borderWidth: 1,
+    borderColor: colors.error[500] + '55',
+    borderRadius: 14,
+    padding: spacing.sm,
+  },
+  alertText: {
+    flex: 1,
+    fontFamily: fonts.semibold,
+    fontSize: 14,
+    color: colors.error[700],
+    writingDirection: 'rtl',
+  },
+
+  /* ─── آخر الحملات ─── */
   recentSection: {
     gap: spacing.xs,
   },
@@ -310,28 +526,41 @@ const styles = StyleSheet.create({
     paddingHorizontal: spacing.xs / 2,
   },
   sectionTitle: {
+    flex: 1,
     fontFamily: fonts.bold,
     fontSize: 16,
     color: colors.neutral[900],
     writingDirection: 'rtl',
   },
+  seeAllBtn: {
+    flexDirection: 'row-reverse',
+    alignItems: 'center',
+    gap: 2,
+  },
+  seeAllText: {
+    fontFamily: fonts.semibold,
+    fontSize: 13,
+    color: colors.primary[600],
+    writingDirection: 'rtl',
+  },
   recentCard: {
     backgroundColor: colors.neutral[0],
-    borderRadius: 16,
+    borderRadius: 14,
     borderWidth: 1,
-    borderColor: colors.primary[200],
+    borderColor: colors.neutral[200],
     padding: spacing.sm,
-    gap: spacing.xs,
+    gap: spacing.xs / 2,
   },
   recentHeader: {
     flexDirection: 'row-reverse',
     alignItems: 'center',
     justifyContent: 'space-between',
+    gap: spacing.xs,
   },
   recentTitle: {
     flex: 1,
     fontFamily: fonts.bold,
-    fontSize: 15,
+    fontSize: 14,
     color: colors.neutral[900],
     writingDirection: 'rtl',
   },
@@ -339,7 +568,7 @@ const styles = StyleSheet.create({
     flexDirection: 'row-reverse',
     alignItems: 'center',
     gap: 4,
-    backgroundColor: colors.success[50],
+    backgroundColor: colors.neutral[100],
     paddingHorizontal: 8,
     paddingVertical: 3,
     borderRadius: 8,
@@ -347,35 +576,27 @@ const styles = StyleSheet.create({
   recentBadgeText: {
     fontFamily: fonts.semibold,
     fontSize: 12,
-    color: colors.success[700],
+    color: colors.neutral[600],
   },
   recentFooter: {
     flexDirection: 'row-reverse',
     alignItems: 'center',
     justifyContent: 'space-between',
-    paddingTop: 4,
-    borderTopWidth: 1,
-    borderTopColor: colors.neutral[100],
   },
   recentDate: {
     fontFamily: fonts.regular,
     fontSize: 12,
     color: colors.neutral[400],
   },
-  recentAction: {
-    flexDirection: 'row-reverse',
-    alignItems: 'center',
-    gap: 2,
-  },
-  recentActionText: {
+  recentStats: {
     fontFamily: fonts.semibold,
     fontSize: 12,
-    color: colors.primary[700],
+    color: colors.neutral[600],
+    writingDirection: 'rtl',
   },
+
+  /* ─── بطاقات العمليات ─── */
   cards: {
     gap: spacing.sm,
-  },
-  pressed: {
-    opacity: 0.8,
   },
 });
