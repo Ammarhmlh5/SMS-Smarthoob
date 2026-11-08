@@ -1,6 +1,7 @@
 import { useState } from 'react';
 import { ActivityIndicator, Pressable, StyleSheet, Text, TextInput, View } from 'react-native';
-import { MessageSquare, Type, X } from 'lucide-react-native';
+import { FileUp, MessageSquare, Type, X } from 'lucide-react-native';
+import * as DocumentPicker from 'expo-document-picker';
 import { Field, formStyles as styles } from '@/components/FormField';
 import { createTemplate, updateTemplate, extractPlaceholders } from '@/lib/templates';
 import type { MessageTemplate } from '@/lib/templates';
@@ -15,6 +16,12 @@ type TemplateFormProps = {
   onCancel: () => void;
 };
 
+async function readPickedFile(asset: DocumentPicker.DocumentPickerAsset): Promise<string> {
+  if (asset.file) return asset.file.text();
+  const response = await fetch(asset.uri);
+  return response.text();
+}
+
 function validate(title: string, body: string): string | null {
   if (title.trim().length === 0) return 'أدخل اسماً للقالب';
   if (title.trim().length > MAX_TITLE) return `العنوان يجب ألا يتجاوز ${MAX_TITLE} حرفاً`;
@@ -28,11 +35,38 @@ export function TemplateForm({ template, onSaved, onCancel }: TemplateFormProps)
   const [title, setTitle] = useState(template?.title ?? '');
   const [body, setBody] = useState(template?.body ?? '');
   const [saving, setSaving] = useState(false);
+  const [importing, setImporting] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
   const changeField = (setter: (value: string) => void) => (value: string) => {
     setter(value);
     setError(null);
+  };
+
+  const handleImport = async () => {
+    setImporting(true);
+    setError(null);
+    try {
+      const result = await DocumentPicker.getDocumentAsync({
+        type: ['text/plain', 'text/markdown', 'text/csv'],
+        copyToCacheDirectory: true,
+      });
+      if (result.canceled) return;
+      const text = (await readPickedFile(result.assets[0])).trim();
+      if (text.length === 0) {
+        setError('الملف فارغ.');
+        return;
+      }
+      if (text.length > MAX_BODY) {
+        setError(`محتوى الملف يتجاوز ${MAX_BODY} حرفاً. اختر ملفاً أقصر.`);
+        return;
+      }
+      setBody(text);
+    } catch {
+      setError('تعذر قراءة الملف. تأكد من أنه ملف نصي (TXT أو CSV أو Markdown).');
+    } finally {
+      setImporting(false);
+    }
   };
 
   const handleSave = async () => {
@@ -88,6 +122,24 @@ export function TemplateForm({ template, onSaved, onCancel }: TemplateFormProps)
       </Field>
 
       <Field label="نص الرسالة" Icon={MessageSquare} hint={`${remaining} حرف متبقٍّ`}>
+        <Pressable
+          accessibilityRole="button"
+          accessibilityLabel="استيراد نص من ملف"
+          onPress={handleImport}
+          disabled={saving || importing}
+          style={({ pressed }) => [
+            localStyles.importButton,
+            pressed && styles.pressed,
+            (saving || importing) && styles.disabled,
+          ]}
+        >
+          {importing ? (
+            <ActivityIndicator size="small" color={colors.primary[700]} />
+          ) : (
+            <FileUp size={16} color={colors.primary[700]} strokeWidth={2} />
+          )}
+          <Text style={localStyles.importText}>استيراد نص من ملف</Text>
+        </Pressable>
         <TextInput
           value={body}
           onChangeText={changeField(setBody)}
@@ -141,6 +193,24 @@ const localStyles = StyleSheet.create({
     alignItems: 'center',
     justifyContent: 'center',
     marginLeft: spacing.xs / 2,
+  },
+  importButton: {
+    flexDirection: 'row-reverse',
+    alignItems: 'center',
+    alignSelf: 'flex-end',
+    gap: spacing.xs / 2,
+    paddingHorizontal: spacing.sm,
+    height: 40,
+    borderRadius: 12,
+    borderWidth: 1,
+    borderColor: colors.primary[200],
+    backgroundColor: colors.primary[50],
+  },
+  importText: {
+    fontFamily: fonts.semibold,
+    fontSize: 14,
+    color: colors.primary[700],
+    writingDirection: 'rtl',
   },
   bodyInput: {
     minHeight: 120,
