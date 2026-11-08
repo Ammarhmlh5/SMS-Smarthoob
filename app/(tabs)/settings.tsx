@@ -593,7 +593,7 @@ const styles = StyleSheet.create({
     height: 38,
     borderRadius: 12,
     borderWidth: 1,
-    borderColor: colors.error[300],
+    borderColor: colors.error[100],
     backgroundColor: colors.error[50],
   },
   logoutCompactText: {

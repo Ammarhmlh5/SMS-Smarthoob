@@ -20,7 +20,7 @@ export function getApiBaseUrl(): string {
 
 // Allow overriding API URL from outside
 export function setApiBaseUrl(url: string) {
-  API_BASE_URL = url;
+  API_BASE_URL = url.trim().replace(/\/+$/, '');
 }
 
 // =====================
@@ -289,14 +289,3 @@ export async function getSettings(userId: string): Promise<{ batch_size: number;
   return result.data || { batch_size: 50, max_retries: 3 };
 }
 
-// =====================
-// Export base URL for configuration
-// =====================
-
-export function getApiBaseUrl(): string {
-  return API_BASE_URL;
-}
-
-export function setApiBaseUrl(url: string) {
-  API_BASE_URL = url.trim().replace(/\/+$/, '');
-}

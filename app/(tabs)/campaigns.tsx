@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useState } from 'react';
+import { useCallback, useEffect, useMemo, useState } from 'react';
 import {
   ActivityIndicator,
   Modal,
@@ -19,6 +19,7 @@ import {
   Loader2,
   Megaphone,
   RotateCw,
+  Search,
   Send,
   Upload,
   Users,
@@ -68,6 +69,10 @@ export default function CampaignsScreen() {
   const [sendError, setSendError] = useState<string | null>(null);
 
   // Detail Modal & Retry state
+    // بحث وتصفية الحملات السابقة
+  const [searchQuery, setSearchQuery] = useState('');
+  const [statusFilter, setStatusFilter] = useState<Campaign['status'] | 'all'>('all');
+
   const [selectedCampaignForDetail, setSelectedCampaignForDetail] = useState<Campaign | null>(null);
   const [showDetailModal, setShowDetailModal] = useState(false);
   const [sendingProgress, setSendingProgress] = useState<{ sent: number; total: number }>({ sent: 0, total: 0 });
@@ -102,6 +107,16 @@ export default function CampaignsScreen() {
   useEffect(() => {
     load();
   }, [load]);
+
+    // تصفية وبحث الحملات
+  const filteredCampaigns = useMemo(() => {
+    return campaigns.filter((camp) => {
+      const matchesStatus = statusFilter === 'all' || camp.status === statusFilter;
+      const q = searchQuery.trim().toLowerCase();
+      const matchesSearch = q === '' || camp.name.toLowerCase().includes(q);
+      return matchesStatus && matchesSearch;
+    });
+  }, [campaigns, searchQuery, statusFilter]);
 
   const hasConnections = settings !== null && settings.connections.length > 0;
   const hasTemplates = templates.length > 0;
@@ -709,48 +724,112 @@ export default function CampaignsScreen() {
             </View>
           ) : null}
 
-          {/* Past campaigns list */}
+          {/* قائمة الحملات السابقة مع بحث وتصفية */}
           {campaigns.length > 0 ? (
             <View style={styles.card}>
+              {/* رأس القسم */}
               <View style={styles.sectionHeaderRow}>
                 <Layers size={18} color={colors.primary[700]} />
-                <Text style={styles.sectionTitle}>الحملات السابقة (سجل المزامنة المحلي)</Text>
+                <Text style={styles.sectionTitle}>الحملات السابقة</Text>
               </View>
               <Text style={styles.cardHint}>اضغط على أي حملة لاستعراض تفاصيل المستلمين وإعادة إرسال الفاشلة</Text>
-              {campaigns.map((camp) => (
-                <Pressable
-                  key={camp.id}
-                  accessibilityRole="button"
-                  accessibilityLabel={`تفاصيل حملة ${camp.name}`}
-                  onPress={() => {
-                    setSelectedCampaignForDetail(camp);
-                    setShowDetailModal(true);
-                  }}
-                  style={({ pressed }) => [styles.campaignItem, pressed && styles.pressed]}
-                >
-                  <View style={styles.campaignHeader}>
-                    <Text style={styles.campaignName} numberOfLines={1}>{camp.name}</Text>
-                    {renderStatusBadge(camp.status)}
-                  </View>
-                  <View style={styles.campaignStats}>
-                    <Text style={styles.campaignStat}>
-                      {camp.sent_count} / {camp.total_recipients} مرسلة
+
+              {/* شريط البحث */}
+              <View style={styles.searchRow}>
+                <Search size={16} color={colors.neutral[400]} style={styles.searchIcon} />
+                <TextInput
+                  style={styles.searchInput}
+                  placeholder="ابحث باسم الحملة..."
+                  placeholderTextColor={colors.neutral[400]}
+                  value={searchQuery}
+                  onChangeText={setSearchQuery}
+                  textAlign="right"
+                  returnKeyType="search"
+                  accessibilityLabel="بحث في الحملات"
+                />
+                {searchQuery.length > 0 ? (
+                  <Pressable onPress={() => setSearchQuery('')} accessibilityLabel="مسح البحث">
+                    <XCircle size={16} color={colors.neutral[400]} />
+                  </Pressable>
+                ) : null}
+              </View>
+
+              {/* تبويبات التصفية */}
+              <View style={styles.filterTabs}>
+                {(
+                  [
+                    { key: 'all', label: 'الكل', count: campaigns.length },
+                    { key: 'completed', label: 'مكتملة', count: campaigns.filter((c) => c.status === 'completed').length },
+                    { key: 'failed', label: 'فاشلة', count: campaigns.filter((c) => c.status === 'failed').length },
+                    { key: 'draft', label: 'مسودة', count: campaigns.filter((c) => c.status === 'draft').length },
+                  ] as { key: Campaign['status'] | 'all'; label: string; count: number }[]
+                ).map((tab) => (
+                  <Pressable
+                    key={tab.key}
+                    onPress={() => setStatusFilter(tab.key)}
+                    style={[styles.filterTab, statusFilter === tab.key && styles.filterTabActive]}
+                    accessibilityRole="tab"
+                    accessibilityState={{ selected: statusFilter === tab.key }}
+                  >
+                    <Text style={[styles.filterTabText, statusFilter === tab.key && styles.filterTabTextActive]}>
+                      {tab.label}
                     </Text>
-                    {camp.failed_count > 0 ? (
-                      <Text style={[styles.campaignStat, { color: colors.error[600] }]}>
-                        {camp.failed_count} فاشلة
-                      </Text>
+                    {tab.count > 0 ? (
+                      <View style={[styles.filterTabBadge, statusFilter === tab.key && styles.filterTabBadgeActive]}>
+                        <Text style={[styles.filterTabBadgeText, statusFilter === tab.key && styles.filterTabBadgeTextActive]}>
+                          {tab.count}
+                        </Text>
+                      </View>
                     ) : null}
-                  </View>
-                  <Text style={styles.campaignDate}>
-                    {new Date(camp.created_at).toLocaleDateString('ar', {
-                      year: 'numeric',
-                      month: 'short',
-                      day: 'numeric',
-                    })}
+                  </Pressable>
+                ))}
+              </View>
+
+              {/* نتائج البحث أو رسالة فارغة */}
+              {filteredCampaigns.length === 0 ? (
+                <View style={styles.centered}>
+                  <Text style={styles.cardHint}>
+                    {searchQuery.length > 0
+                      ? `لا توجد حملات تطابق "${searchQuery}"`
+                      : 'لا توجد حملات بهذه الحالة'}
                   </Text>
-                </Pressable>
-              ))}
+                </View>
+              ) : (
+                filteredCampaigns.map((camp) => (
+                  <Pressable
+                    key={camp.id}
+                    accessibilityRole="button"
+                    accessibilityLabel={`تفاصيل حملة ${camp.name}`}
+                    onPress={() => {
+                      setSelectedCampaignForDetail(camp);
+                      setShowDetailModal(true);
+                    }}
+                    style={({ pressed }) => [styles.campaignItem, pressed && styles.pressed]}
+                  >
+                    <View style={styles.campaignHeader}>
+                      <Text style={styles.campaignName} numberOfLines={1}>{camp.name}</Text>
+                      {renderStatusBadge(camp.status)}
+                    </View>
+                    <View style={styles.campaignStats}>
+                      <Text style={styles.campaignStat}>
+                        {camp.sent_count} / {camp.total_recipients} مرسلة
+                      </Text>
+                      {camp.failed_count > 0 ? (
+                        <Text style={[styles.campaignStat, { color: colors.error[600] }]}>
+                          {camp.failed_count} فاشلة
+                        </Text>
+                      ) : null}
+                    </View>
+                    <Text style={styles.campaignDate}>
+                      {new Date(camp.created_at).toLocaleDateString('ar', {
+                        year: 'numeric',
+                        month: 'short',
+                        day: 'numeric',
+                      })}
+                    </Text>
+                  </Pressable>
+                ))
+              )}
             </View>
           ) : null}
         </>
@@ -1190,5 +1269,77 @@ const styles = StyleSheet.create({
   },
   disabled: {
     opacity: 0.5,
+  },
+  // ── بحث وتصفية الحملات ──────────────────────────────
+  searchRow: {
+    flexDirection: 'row-reverse',
+    alignItems: 'center',
+    gap: 8,
+    backgroundColor: colors.neutral[50],
+    borderRadius: 12,
+    borderWidth: 1,
+    borderColor: colors.neutral[200],
+    paddingHorizontal: 12,
+    paddingVertical: 8,
+  },
+  searchIcon: {
+    flexShrink: 0,
+  },
+  searchInput: {
+    flex: 1,
+    fontFamily: fonts.regular,
+    fontSize: 14,
+    color: colors.neutral[900],
+    padding: 0,
+    writingDirection: 'rtl',
+  },
+  filterTabs: {
+    flexDirection: 'row-reverse',
+    gap: 6,
+    flexWrap: 'wrap',
+  },
+  filterTab: {
+    flexDirection: 'row-reverse',
+    alignItems: 'center',
+    gap: 4,
+    paddingHorizontal: 10,
+    paddingVertical: 6,
+    borderRadius: 20,
+    borderWidth: 1,
+    borderColor: colors.neutral[200],
+    backgroundColor: colors.neutral[50],
+  },
+  filterTabActive: {
+    borderColor: colors.primary[500],
+    backgroundColor: colors.primary[50],
+  },
+  filterTabText: {
+    fontFamily: fonts.regular,
+    fontSize: 12,
+    color: colors.neutral[600],
+  },
+  filterTabTextActive: {
+    fontFamily: fonts.bold,
+    color: colors.primary[700],
+  },
+  filterTabBadge: {
+    minWidth: 18,
+    height: 18,
+    borderRadius: 9,
+    backgroundColor: colors.neutral[200],
+    alignItems: 'center',
+    justifyContent: 'center',
+    paddingHorizontal: 4,
+  },
+  filterTabBadgeActive: {
+    backgroundColor: colors.primary[200],
+  },
+  filterTabBadgeText: {
+    fontFamily: fonts.bold,
+    fontSize: 10,
+    color: colors.neutral[600],
+  },
+  filterTabBadgeTextActive: {
+    color: colors.primary[800],
   },
 });
