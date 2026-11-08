@@ -2,8 +2,10 @@ import { useEffect, useState } from 'react';
 import {
   ActivityIndicator,
   Modal,
+  Platform,
   Pressable,
   ScrollView,
+  Share,
   StyleSheet,
   Text,
   View,
@@ -12,10 +14,10 @@ import {
   AlertCircle,
   CheckCircle2,
   Clock,
-  Layers,
+  Download,
+  FileSpreadsheet,
   Phone,
   RefreshCw,
-  Send,
   Users,
   X,
   XCircle,
@@ -43,6 +45,7 @@ export function CampaignDetailModal({
   const [recipients, setRecipients] = useState<CampaignRecipient[]>([]);
   const [loading, setLoading] = useState(false);
   const [filter, setFilter] = useState<FilterType>('all');
+  const [exporting, setExporting] = useState(false);
 
   useEffect(() => {
     if (visible && campaign) {
@@ -72,6 +75,49 @@ export function CampaignDetailModal({
   });
 
   const failedRecipients = recipients.filter((r) => r.status === 'failed');
+
+  const handleExportCSV = async () => {
+    if (recipients.length === 0) return;
+    setExporting(true);
+    try {
+      // Header row in Arabic
+      const headers = ['رقم الهاتف', 'اسم المستلم', 'الحالة', 'تاريخ الإرسال', 'نص الرسالة', 'سبب الخطأ'];
+
+      // Rows
+      const rows = recipients.map((r) => [
+        `"${r.subscriber_phone.replace(/"/g, '""')}"`,
+        `"${(r.subscriber_name || '').replace(/"/g, '""')}"`,
+        `"${r.status === 'sent' ? 'تم الإرسال' : r.status === 'failed' ? 'فشلت' : 'قيد الانتظار'}"`,
+        `"${(r.sent_at || '').replace(/"/g, '""')}"`,
+        `"${(r.message_body || '').replace(/"/g, '""')}"`,
+        `"${(r.error_message || '').replace(/"/g, '""')}"`,
+      ]);
+
+      // Add UTF-8 BOM so Excel displays Arabic without garbled characters
+      const csvContent = '\uFEFF' + [headers.join(','), ...rows.map((row) => row.join(','))].join('\r\n');
+
+      if (Platform.OS === 'web') {
+        const blob = new Blob([csvContent], { type: 'text/csv;charset=utf-8;' });
+        const url = URL.createObjectURL(blob);
+        const link = document.createElement('a');
+        link.href = url;
+        link.setAttribute('download', `${campaign.name}_report.csv`);
+        document.body.appendChild(link);
+        link.click();
+        document.body.removeChild(link);
+        URL.revokeObjectURL(url);
+      } else {
+        await Share.share({
+          message: csvContent,
+          title: `تقرير حملة ${campaign.name}`,
+        });
+      }
+    } catch (err) {
+      console.warn('Failed to export campaign CSV:', err);
+    } finally {
+      setExporting(false);
+    }
+  };
 
   const renderStatusIcon = (status: CampaignRecipient['status']) => {
     switch (status) {
@@ -143,19 +189,42 @@ export function CampaignDetailModal({
             </View>
           </View>
 
-          {/* Action: Retry Failed Button */}
-          {failedRecipients.length > 0 && onRetryFailed ? (
+          {/* Action Buttons Row: Retry Failed & Export CSV */}
+          <View style={styles.actionsContainer}>
+            {failedRecipients.length > 0 && onRetryFailed ? (
+              <Pressable
+                accessibilityRole="button"
+                onPress={() => onRetryFailed(failedRecipients)}
+                style={({ pressed }) => [styles.retryAllButton, pressed && styles.pressed]}
+              >
+                <RefreshCw size={15} color={colors.neutral[0]} strokeWidth={2} />
+                <Text style={styles.retryAllText}>
+                  إعادة إرسال الفاشلة ({failedRecipients.length})
+                </Text>
+              </Pressable>
+            ) : null}
+
             <Pressable
               accessibilityRole="button"
-              onPress={() => onRetryFailed(failedRecipients)}
-              style={({ pressed }) => [styles.retryAllButton, pressed && styles.pressed]}
+              accessibilityLabel="تصدير التقرير"
+              onPress={handleExportCSV}
+              disabled={exporting || recipients.length === 0}
+              style={({ pressed }) => [
+                styles.exportButton,
+                pressed && styles.pressed,
+                (exporting || recipients.length === 0) && styles.disabled,
+              ]}
             >
-              <RefreshCw size={16} color={colors.neutral[0]} strokeWidth={2} />
-              <Text style={styles.retryAllText}>
-                إعادة إرسال الرسائل الفاشلة فقط ({failedRecipients.length} رسالة)
-              </Text>
+              {exporting ? (
+                <ActivityIndicator color={colors.primary[700]} size="small" />
+              ) : (
+                <>
+                  <Download size={15} color={colors.primary[700]} strokeWidth={2} />
+                  <Text style={styles.exportButtonText}>تصدير التقرير (CSV)</Text>
+                </>
+              )}
             </Pressable>
-          ) : null}
+          </View>
 
           {/* Filter Pills */}
           <View style={styles.filtersRow}>
@@ -300,21 +369,44 @@ const styles = StyleSheet.create({
     color: colors.neutral[500],
     writingDirection: 'rtl',
   },
+  actionsContainer: {
+    flexDirection: 'row-reverse',
+    gap: spacing.xs,
+    paddingHorizontal: spacing.sm,
+    marginBottom: spacing.xs,
+  },
   retryAllButton: {
+    flex: 1,
     flexDirection: 'row-reverse',
     alignItems: 'center',
     justifyContent: 'center',
-    gap: 8,
+    gap: 6,
     backgroundColor: colors.error[600],
-    marginHorizontal: spacing.sm,
-    marginBottom: spacing.xs,
-    height: 44,
+    height: 42,
     borderRadius: 12,
   },
   retryAllText: {
     fontFamily: fonts.semibold,
-    fontSize: 13,
+    fontSize: 12,
     color: colors.neutral[0],
+    writingDirection: 'rtl',
+  },
+  exportButton: {
+    flex: 1,
+    flexDirection: 'row-reverse',
+    alignItems: 'center',
+    justifyContent: 'center',
+    gap: 6,
+    borderWidth: 1,
+    borderColor: colors.primary[200],
+    backgroundColor: colors.primary[50],
+    height: 42,
+    borderRadius: 12,
+  },
+  exportButtonText: {
+    fontFamily: fonts.semibold,
+    fontSize: 12,
+    color: colors.primary[700],
     writingDirection: 'rtl',
   },
   filtersRow: {
@@ -433,6 +525,9 @@ const styles = StyleSheet.create({
     fontFamily: fonts.regular,
     fontSize: 13,
     color: colors.neutral[500],
+  },
+  disabled: {
+    opacity: 0.5,
   },
   pressed: {
     opacity: 0.8,

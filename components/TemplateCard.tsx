@@ -1,6 +1,6 @@
 import { useState } from 'react';
 import { ActivityIndicator, Pressable, StyleSheet, Text, View } from 'react-native';
-import { Pencil, Trash2 } from 'lucide-react-native';
+import { Copy, Pencil, Trash2 } from 'lucide-react-native';
 import { formStyles } from '@/components/FormField';
 import { deleteTemplate, extractPlaceholders } from '@/lib/templates';
 import type { MessageTemplate } from '@/lib/templates';
@@ -10,10 +10,11 @@ type TemplateCardProps = {
   template: MessageTemplate;
   disabled: boolean;
   onEdit: () => void;
+  onCopy?: () => void;
   onDeleted: (id: string) => void;
 };
 
-export function TemplateCard({ template, disabled, onEdit, onDeleted }: TemplateCardProps) {
+export function TemplateCard({ template, disabled, onEdit, onCopy, onDeleted }: TemplateCardProps) {
   const [confirmingDelete, setConfirmingDelete] = useState(false);
   const [deleting, setDeleting] = useState(false);
   const [deleteError, setDeleteError] = useState<string | null>(null);
@@ -49,6 +50,17 @@ export function TemplateCard({ template, disabled, onEdit, onDeleted }: Template
           </Text>
         </View>
         <View style={styles.actions}>
+          {onCopy ? (
+            <Pressable
+              accessibilityRole="button"
+              accessibilityLabel="نسخ القالب"
+              onPress={onCopy}
+              disabled={disabled}
+              style={({ pressed }) => [styles.iconButton, pressed && formStyles.pressed, disabled && formStyles.disabled]}
+            >
+              <Copy size={18} color={colors.primary[700]} strokeWidth={2} />
+            </Pressable>
+          ) : null}
           <Pressable
             accessibilityRole="button"
             accessibilityLabel="تعديل القالب"

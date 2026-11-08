@@ -12,6 +12,7 @@ const MAX_BODY = 1000;
 
 type TemplateFormProps = {
   template: MessageTemplate | null;
+  initialValues?: { title: string; body: string };
   onSaved: (template: MessageTemplate, mapping?: Record<string, string>) => void;
   onCancel: () => void;
 };
@@ -24,10 +25,10 @@ function validate(title: string, body: string): string | null {
   return null;
 }
 
-export function TemplateForm({ template, onSaved, onCancel }: TemplateFormProps) {
+export function TemplateForm({ template, initialValues, onSaved, onCancel }: TemplateFormProps) {
   const isEdit = template !== null;
-  const [title, setTitle] = useState(template?.title ?? '');
-  const [body, setBody] = useState(template?.body ?? '');
+  const [title, setTitle] = useState(template?.title ?? initialValues?.title ?? '');
+  const [body, setBody] = useState(template?.body ?? initialValues?.body ?? '');
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [showImportModal, setShowImportModal] = useState(false);
