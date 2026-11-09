@@ -1,6 +1,5 @@
 import { useCallback, useEffect, useState } from 'react';
 import {
-  ActivityIndicator,
   Pressable,
   RefreshControl,
   ScrollView,
@@ -8,26 +7,19 @@ import {
   Text,
   View,
 } from 'react-native';
-import { useRouter } from 'expo-router';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import {
   AlertTriangle,
   CheckCircle2,
-  ChevronLeft,
-  ClipboardList,
   Database,
   FileText,
-  Layers,
   Megaphone,
-  Plus,
   RefreshCw,
   Send,
-  Settings,
   Sparkles,
   TrendingUp,
   Zap,
 } from 'lucide-react-native';
-import { MenuCard } from '@/components/MenuCard';
 import { database } from '@/lib/database';
 import type { Campaign } from '@/lib/campaigns';
 import { supabase } from '@/lib/supabase';
@@ -42,7 +34,6 @@ interface DashboardStats {
 }
 
 export default function MainMenuScreen() {
-  const router = useRouter();
   const insets = useSafeAreaInsets();
 
   const [stats, setStats] = useState<DashboardStats>({
@@ -56,13 +47,26 @@ export default function MainMenuScreen() {
   const [loading, setLoading] = useState(true);
   const [refreshing, setRefreshing] = useState(false);
   const [userEmail, setUserEmail] = useState<string | null>(null);
+  const [loadError, setLoadError] = useState<string | null>(null);
+  const [syncWarning, setSyncWarning] = useState<string | null>(null);
 
   const loadDashboard = useCallback(async (isRefresh = false) => {
     if (!isRefresh) setLoading(true);
+    setLoadError(null);
+    setSyncWarning(null);
     try {
-      const { data: { user } } = await supabase.auth.getUser();
+      const { data: { user }, error } = await supabase.auth.getUser();
+      if (error) throw error;
+
       const uid = user?.id || 'default';
       setUserEmail(user?.email ?? null);
+
+      if (user) {
+        const syncResult = await database.syncWithSupabase();
+        if (!syncResult.success) {
+          setSyncWarning('تعذر تحديث البيانات من الخادم؛ قد تكون البيانات المعروضة آخر نسخة محفوظة محلياً.');
+        }
+      }
 
       const [campaigns, templates, pendingCount] = await Promise.all([
         database.getCampaigns(uid),
@@ -82,9 +86,12 @@ export default function MainMenuScreen() {
       });
 
       // آخر 3 حملات
-      setRecentCampaigns((campaigns as unknown as Campaign[]).slice(0, 3));
-    } catch {
-      // Offline fallback: ignore error
+      setRecentCampaigns(campaigns.slice(0, 3).map((campaign) => ({
+        ...campaign,
+        status: campaign.status === 'preparing' ? 'sending' : campaign.status,
+      })));
+    } catch (error) {
+      setLoadError(error instanceof Error ? error.message : 'تعذر تحميل بيانات لوحة التحكم.');
     } finally {
       setLoading(false);
       setRefreshing(false);
@@ -98,7 +105,7 @@ export default function MainMenuScreen() {
     loadDashboard(true);
   };
 
-  const isFirstRun = !loading && stats.totalCampaigns === 0 && stats.totalTemplates === 0;
+  const isFirstRun = !loading && !loadError && stats.totalCampaigns === 0 && stats.totalTemplates === 0;
 
   return (
     <ScrollView
@@ -139,6 +146,28 @@ export default function MainMenuScreen() {
         )}
       </View>
 
+      {loadError ? (
+        <View style={styles.loadErrorCard}>
+          <AlertTriangle size={20} color={colors.error[600]} />
+          <Text style={styles.loadErrorText}>{loadError}</Text>
+          <Pressable
+            accessibilityRole="button"
+            onPress={onRefresh}
+            style={({ pressed }) => [styles.retryButton, pressed && styles.pressed]}
+          >
+            <RefreshCw size={16} color={colors.primary[700]} strokeWidth={2} />
+            <Text style={styles.retryText}>إعادة المحاولة</Text>
+          </Pressable>
+        </View>
+      ) : (
+        <>
+      {syncWarning && (
+        <View style={styles.syncWarningCard}>
+          <AlertTriangle size={18} color={colors.warning[600]} />
+          <Text style={styles.syncWarningText}>{syncWarning}</Text>
+        </View>
+      )}
+
       {/* ───── Onboarding (أول تشغيل) ───── */}
       {isFirstRun && (
         <View style={styles.onboardingCard}>
@@ -149,78 +178,40 @@ export default function MainMenuScreen() {
           <Text style={styles.onboardingDesc}>
             ابدأ بإنشاء قالب رسالة، ثم أنشئ حملتك الأولى لإرسال الفواتير لعملائك.
           </Text>
-          <View style={styles.onboardingSteps}>
-            <Pressable
-              onPress={() => router.navigate('/templates')}
-              style={({ pressed }) => [styles.onboardingStep, pressed && styles.pressed]}
-            >
-              <View style={styles.stepNumber}><Text style={styles.stepNumText}>١</Text></View>
-              <Text style={styles.stepText}>أنشئ قالب رسالة</Text>
-              <ChevronLeft size={16} color={colors.primary[600]} />
-            </Pressable>
-            <Pressable
-              onPress={() => router.navigate('/settings')}
-              style={({ pressed }) => [styles.onboardingStep, pressed && styles.pressed]}
-            >
-              <View style={styles.stepNumber}><Text style={styles.stepNumText}>٢</Text></View>
-              <Text style={styles.stepText}>أضف بوابة هدهد في الإعدادات</Text>
-              <ChevronLeft size={16} color={colors.primary[600]} />
-            </Pressable>
-            <Pressable
-              onPress={() => router.navigate('/campaigns')}
-              style={({ pressed }) => [styles.onboardingStep, pressed && styles.pressed]}
-            >
-              <View style={styles.stepNumber}><Text style={styles.stepNumText}>٣</Text></View>
-              <Text style={styles.stepText}>استيراد الفواتير وأرسل حملتك</Text>
-              <ChevronLeft size={16} color={colors.primary[600]} />
-            </Pressable>
-          </View>
         </View>
       )}
 
       {/* ───── شبكة الإحصائيات ───── */}
       <View style={styles.statsGrid}>
         {/* رسائل مرسلة */}
-        <Pressable
-          onPress={() => router.navigate('/campaigns')}
-          style={({ pressed }) => [styles.statCard, pressed && styles.pressed]}
-        >
+        <View style={styles.statCard}>
           <View style={[styles.statIconWrap, { backgroundColor: colors.primary[50] }]}>
             <Send size={18} color={colors.primary[700]} />
           </View>
           <Text style={styles.statValue}>{loading ? '…' : stats.totalMessagesSent.toLocaleString('ar')}</Text>
           <Text style={styles.statLabel}>رسائل مرسلة</Text>
-        </Pressable>
+        </View>
 
         {/* حملات */}
-        <Pressable
-          onPress={() => router.navigate('/campaigns')}
-          style={({ pressed }) => [styles.statCard, pressed && styles.pressed]}
-        >
+        <View style={styles.statCard}>
           <View style={[styles.statIconWrap, { backgroundColor: colors.secondary[50] }]}>
             <Megaphone size={18} color={colors.secondary[600]} />
           </View>
           <Text style={styles.statValue}>{loading ? '…' : stats.totalCampaigns}</Text>
           <Text style={styles.statLabel}>حملات منشأة</Text>
-        </Pressable>
+        </View>
 
         {/* قوالب */}
-        <Pressable
-          onPress={() => router.navigate('/templates')}
-          style={({ pressed }) => [styles.statCard, pressed && styles.pressed]}
-        >
+        <View style={styles.statCard}>
           <View style={[styles.statIconWrap, { backgroundColor: colors.success[50] }]}>
             <FileText size={18} color={colors.success[600]} />
           </View>
           <Text style={styles.statValue}>{loading ? '…' : stats.totalTemplates}</Text>
           <Text style={styles.statLabel}>قوالب جاهزة</Text>
-        </Pressable>
+        </View>
 
         {/* سجل المزامنة */}
-        <Pressable
-          onPress={() => router.navigate('/settings')}
-          style={({ pressed }) => [styles.statCard, pressed && styles.pressed]}
-        >
+        <View style={styles.statCard}>
           <View style={[styles.statIconWrap, {
             backgroundColor: stats.pendingSync > 0 ? colors.warning[500] + '20' : colors.neutral[100],
           }]}>
@@ -230,21 +221,17 @@ export default function MainMenuScreen() {
             {loading ? '…' : stats.pendingSync > 0 ? `${stats.pendingSync}` : '✓'}
           </Text>
           <Text style={styles.statLabel}>{stats.pendingSync > 0 ? 'معلق للمزامنة' : 'متطابق'}</Text>
-        </Pressable>
+        </View>
       </View>
 
       {/* ───── تنبيه الرسائل الفاشلة ───── */}
       {!loading && stats.failedMessages > 0 && (
-        <Pressable
-          onPress={() => router.navigate('/campaigns')}
-          style={({ pressed }) => [styles.alertCard, pressed && styles.pressed]}
-        >
+        <View style={styles.alertCard}>
           <AlertTriangle size={18} color={colors.error[600]} strokeWidth={2} />
           <Text style={styles.alertText}>
-            {`${stats.failedMessages} رسالة فاشلة — اضغط لإعادة المحاولة`}
+            {`${stats.failedMessages} رسالة فاشلة`}
           </Text>
-          <ChevronLeft size={16} color={colors.error[600]} />
-        </Pressable>
+        </View>
       )}
 
       {/* ───── آخر الحملات ───── */}
@@ -253,21 +240,10 @@ export default function MainMenuScreen() {
           <View style={styles.sectionHeaderRow}>
             <TrendingUp size={17} color={colors.primary[700]} strokeWidth={2} />
             <Text style={styles.sectionTitle}>آخر الحملات</Text>
-            <Pressable
-              onPress={() => router.navigate('/campaigns')}
-              style={({ pressed }) => [styles.seeAllBtn, pressed && styles.pressed]}
-            >
-              <Text style={styles.seeAllText}>عرض الكل</Text>
-              <ChevronLeft size={14} color={colors.primary[600]} />
-            </Pressable>
           </View>
 
           {recentCampaigns.map((camp) => (
-            <Pressable
-              key={camp.id}
-              onPress={() => router.navigate('/campaigns')}
-              style={({ pressed }) => [styles.recentCard, pressed && styles.pressed]}
-            >
+            <View key={camp.id} style={styles.recentCard}>
               <View style={styles.recentHeader}>
                 <Text style={styles.recentTitle} numberOfLines={1}>{camp.name}</Text>
                 <View style={[
@@ -300,36 +276,14 @@ export default function MainMenuScreen() {
                   {camp.failed_count > 0 ? ` · ${camp.failed_count} فاشلة` : ''}
                 </Text>
               </View>
-            </Pressable>
+            </View>
           ))}
         </View>
       )}
 
-      {/* ───── البطاقات الرئيسية ───── */}
-      <View style={styles.sectionHeaderRow}>
-        <Text style={styles.sectionTitle}>العمليات الرئيسية</Text>
-      </View>
+        </>
+      )}
 
-      <View style={styles.cards}>
-        <MenuCard
-          title="تجهيز وإرسال الحملات"
-          description="استيراد الفواتير (Excel/CSV/PDF) ومطابقة المتغيرات الذكية ومعاينة الرسائل"
-          Icon={Layers}
-          onPress={() => router.navigate('/campaigns')}
-        />
-        <MenuCard
-          title="إدارة القوالب والرسائل"
-          description="إنشاء وتعديل واستنساخ قوالب الرسائل مع دعم المتغيرات العربية ومعاينة حية"
-          Icon={ClipboardList}
-          onPress={() => router.navigate('/templates')}
-        />
-        <MenuCard
-          title="إعدادات البوابات والمزامنة"
-          description="إدارة بوابات هدهد، التحكم بسرعة التدفق، المزامنة السحابية، وخادم الـ AI"
-          Icon={Settings}
-          onPress={() => router.navigate('/settings')}
-        />
-      </View>
     </ScrollView>
   );
 }
@@ -344,6 +298,50 @@ const styles = StyleSheet.create({
     gap: spacing.md,
   },
   pressed: { opacity: 0.8 },
+  loadErrorCard: {
+    alignItems: 'center',
+    gap: spacing.sm,
+    backgroundColor: colors.error[50],
+    borderWidth: 1,
+    borderColor: colors.error[500] + '55',
+    borderRadius: 14,
+    padding: spacing.md,
+  },
+  loadErrorText: {
+    fontFamily: fonts.regular,
+    fontSize: 14,
+    color: colors.error[700],
+    textAlign: 'center',
+    writingDirection: 'rtl',
+  },
+  retryButton: {
+    flexDirection: 'row-reverse',
+    alignItems: 'center',
+    gap: spacing.xs,
+    paddingVertical: spacing.xs,
+    paddingHorizontal: spacing.sm,
+  },
+  retryText: {
+    fontFamily: fonts.semibold,
+    fontSize: 14,
+    color: colors.primary[700],
+    writingDirection: 'rtl',
+  },
+  syncWarningCard: {
+    flexDirection: 'row-reverse',
+    alignItems: 'center',
+    gap: spacing.xs,
+    backgroundColor: colors.warning[500] + '20',
+    borderRadius: 14,
+    padding: spacing.sm,
+  },
+  syncWarningText: {
+    flex: 1,
+    fontFamily: fonts.regular,
+    fontSize: 13,
+    color: colors.warning[600],
+    writingDirection: 'rtl',
+  },
 
   /* ─── الترويسة ─── */
   header: {
@@ -424,42 +422,6 @@ const styles = StyleSheet.create({
     textAlign: 'right',
     writingDirection: 'rtl',
   },
-  onboardingSteps: {
-    width: '100%',
-    gap: spacing.xs / 2,
-    marginTop: spacing.xs / 2,
-  },
-  onboardingStep: {
-    flexDirection: 'row-reverse',
-    alignItems: 'center',
-    gap: spacing.xs,
-    backgroundColor: colors.neutral[0],
-    borderRadius: 12,
-    padding: spacing.xs,
-    borderWidth: 1,
-    borderColor: colors.primary[200],
-  },
-  stepNumber: {
-    width: 28,
-    height: 28,
-    borderRadius: 14,
-    backgroundColor: colors.primary[700],
-    alignItems: 'center',
-    justifyContent: 'center',
-  },
-  stepNumText: {
-    fontFamily: fonts.bold,
-    fontSize: 13,
-    color: colors.neutral[0],
-  },
-  stepText: {
-    flex: 1,
-    fontFamily: fonts.semibold,
-    fontSize: 14,
-    color: colors.neutral[800],
-    writingDirection: 'rtl',
-  },
-
   /* ─── شبكة الإحصائيات ─── */
   statsGrid: {
     flexDirection: 'row-reverse',
@@ -532,17 +494,6 @@ const styles = StyleSheet.create({
     color: colors.neutral[900],
     writingDirection: 'rtl',
   },
-  seeAllBtn: {
-    flexDirection: 'row-reverse',
-    alignItems: 'center',
-    gap: 2,
-  },
-  seeAllText: {
-    fontFamily: fonts.semibold,
-    fontSize: 13,
-    color: colors.primary[600],
-    writingDirection: 'rtl',
-  },
   recentCard: {
     backgroundColor: colors.neutral[0],
     borderRadius: 14,
@@ -593,10 +544,5 @@ const styles = StyleSheet.create({
     fontSize: 12,
     color: colors.neutral[600],
     writingDirection: 'rtl',
-  },
-
-  /* ─── بطاقات العمليات ─── */
-  cards: {
-    gap: spacing.sm,
   },
 });
