@@ -27,6 +27,7 @@ import type { CampaignRecipient } from '@/lib/database';
 import type { Campaign } from '@/lib/campaigns';
 import { canResumeCampaignQueue } from '@/lib/campaignQueueStatus';
 import { isUncertainDeliveryError } from '@/lib/campaignClaimLease';
+import { escapeSpreadsheetCsvCell } from '@/lib/csv';
 import { colors, fonts, spacing } from '@/constants/theme';
 
 type FilterType = 'all' | 'sent' | 'failed' | 'pending';
@@ -114,16 +115,21 @@ export function CampaignDetailModal({
 
       // Rows
       const rows = recipients.map((r) => [
-        `"${r.subscriber_phone.replace(/"/g, '""')}"`,
-        `"${(r.subscriber_name || '').replace(/"/g, '""')}"`,
-        `"${r.status === 'sent' ? 'تم الإرسال' : r.status === 'failed' ? 'فشلت' : 'قيد الانتظار'}"`,
-        `"${(r.sent_at || '').replace(/"/g, '""')}"`,
-        `"${(r.message_body || '').replace(/"/g, '""')}"`,
-        `"${(r.error_message || '').replace(/"/g, '""')}"`,
+        escapeSpreadsheetCsvCell(r.subscriber_phone),
+        escapeSpreadsheetCsvCell(r.subscriber_name || ''),
+        escapeSpreadsheetCsvCell(
+          r.status === 'sent' ? 'تم الإرسال' : r.status === 'failed' ? 'فشلت' : 'قيد الانتظار',
+        ),
+        escapeSpreadsheetCsvCell(r.sent_at || ''),
+        escapeSpreadsheetCsvCell(r.message_body || ''),
+        escapeSpreadsheetCsvCell(r.error_message || ''),
       ]);
 
       // Add UTF-8 BOM so Excel displays Arabic without garbled characters
-      const csvContent = '\uFEFF' + [headers.join(','), ...rows.map((row) => row.join(','))].join('\r\n');
+      const csvContent = '\uFEFF' + [
+        headers.map(escapeSpreadsheetCsvCell).join(','),
+        ...rows.map((row) => row.join(',')),
+      ].join('\r\n');
 
       if (Platform.OS === 'web') {
         const blob = new Blob([csvContent], { type: 'text/csv;charset=utf-8;' });

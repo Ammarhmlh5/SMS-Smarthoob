@@ -7,6 +7,13 @@
  */
 
 import AsyncStorage from '@react-native-async-storage/async-storage';
+import {
+  parseStoredSettings,
+  validateRemoteSendSetting,
+  validateSettings,
+} from './settingsValidation';
+
+export { validateSettings } from './settingsValidation';
 
 // ─── أنواع البيانات ───────────────────────────────────────────────────────────
 
@@ -57,16 +64,17 @@ export async function loadSettings(): Promise<AppSettings> {
         AsyncStorage.getItem(KEYS.enableRemoteSend),
       ]);
 
-    return {
-      apiBaseUrl: apiBaseUrl ?? DEFAULT_SETTINGS.apiBaseUrl,
-      delayBetweenMs: delayBetweenMs !== null ? parseInt(delayBetweenMs, 10) : DEFAULT_SETTINGS.delayBetweenMs,
-      batchSize: batchSize !== null ? parseInt(batchSize, 10) : DEFAULT_SETTINGS.batchSize,
-      maxRetryAttempts:
-        maxRetryAttempts !== null ? parseInt(maxRetryAttempts, 10) : DEFAULT_SETTINGS.maxRetryAttempts,
-      enableRemoteSend: enableRemoteSend === 'true',
-    };
-  } catch {
-    return { ...DEFAULT_SETTINGS };
+    return parseStoredSettings(
+      { apiBaseUrl, delayBetweenMs, batchSize, maxRetryAttempts, enableRemoteSend },
+      DEFAULT_SETTINGS,
+    );
+  } catch (error) {
+    throw new Error(
+      error instanceof Error
+        ? `تعذر تحميل إعدادات التطبيق: ${error.message}`
+        : 'تعذر تحميل إعدادات التطبيق من التخزين المحلي.',
+      { cause: error },
+    );
   }
 }
 
@@ -83,6 +91,9 @@ export async function saveSendingConfig(config: {
   delayBetweenMs: number;
   maxRetryAttempts: number;
 }): Promise<void> {
+  const validationError = validateSettings(config);
+  if (validationError) throw new Error(validationError);
+
   await Promise.all([
     AsyncStorage.setItem(KEYS.batchSize, String(config.batchSize)),
     AsyncStorage.setItem(KEYS.delayBetweenMs, String(config.delayBetweenMs)),
@@ -92,11 +103,17 @@ export async function saveSendingConfig(config: {
 
 /** يفعّل أو يعطّل الإرسال الفعلي */
 export async function setEnableRemoteSend(enabled: boolean): Promise<void> {
+  const validationError = validateRemoteSendSetting(enabled);
+  if (validationError) throw new Error(validationError);
+
   await AsyncStorage.setItem(KEYS.enableRemoteSend, enabled ? 'true' : 'false');
 }
 
 /** يحفظ جميع الإعدادات دفعةً واحدة */
 export async function saveAllSettings(settings: AppSettings): Promise<void> {
+  const validationError = validateSettings(settings);
+  if (validationError) throw new Error(validationError);
+
   await Promise.all([
     AsyncStorage.setItem(KEYS.apiBaseUrl, settings.apiBaseUrl.trim()),
     AsyncStorage.setItem(KEYS.delayBetweenMs, String(settings.delayBetweenMs)),
@@ -104,22 +121,4 @@ export async function saveAllSettings(settings: AppSettings): Promise<void> {
     AsyncStorage.setItem(KEYS.maxRetryAttempts, String(settings.maxRetryAttempts)),
     AsyncStorage.setItem(KEYS.enableRemoteSend, settings.enableRemoteSend ? 'true' : 'false'),
   ]);
-}
-
-// ─── التحقق من القيم ──────────────────────────────────────────────────────────
-
-export function validateSettings(settings: Partial<AppSettings>): string | null {
-  if (settings.batchSize !== undefined && (settings.batchSize < 1 || settings.batchSize > 200)) {
-    return 'حجم الدفعة يجب أن يكون بين 1 و 200';
-  }
-  if (settings.delayBetweenMs !== undefined && settings.delayBetweenMs < 0) {
-    return 'التأخير يجب أن يكون 0 أو أكثر';
-  }
-  if (settings.maxRetryAttempts !== undefined && (settings.maxRetryAttempts < 0 || settings.maxRetryAttempts > 10)) {
-    return 'محاولات إعادة الإرسال يجب أن تكون بين 0 و 10';
-  }
-  if (settings.apiBaseUrl !== undefined && settings.apiBaseUrl.trim().length === 0) {
-    return 'عنوان الخادم لا يمكن أن يكون فارغاً';
-  }
-  return null;
 }

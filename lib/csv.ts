@@ -3,6 +3,11 @@ export type ParsedCsv = {
   rows: string[][];
 };
 
+export function escapeSpreadsheetCsvCell(value: string): string {
+  const safeValue = /^\s*[=+\-@]/.test(value) ? `'${value}` : value;
+  return `"${safeValue.replace(/"/g, '""')}"`;
+}
+
 function detectDelimiter(source: string): string {
   const counts = new Map<string, number>([
     [',', 0],

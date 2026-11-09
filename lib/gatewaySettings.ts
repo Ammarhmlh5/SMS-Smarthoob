@@ -1,4 +1,5 @@
 import { supabase } from '@/lib/supabase';
+import { getConnectionTestError } from './connectionTestError';
 
 export type GatewayConnection = {
   id: string;
@@ -25,6 +26,7 @@ export type ConnectionInput = {
 export type ConnectionTestResult = {
   reachable: boolean;
   status: number | null;
+  error?: string;
 };
 
 type PreferenceRow = {
@@ -187,9 +189,13 @@ export async function testGatewayConnection(id: string): Promise<ConnectionTestR
       method: 'HEAD',
     }, 8000);
     await response.body?.cancel();
-    return { reachable: response.status < 500, status: response.status };
-  } catch {
-    return { reachable: false, status: null };
+    return { reachable: true, status: response.status };
+  } catch (error) {
+    return {
+      reachable: false,
+      status: null,
+      error: getConnectionTestError(error),
+    };
   }
 }
 

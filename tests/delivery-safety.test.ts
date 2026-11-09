@@ -21,10 +21,19 @@ import {
 import type { GatewayConnection } from '../lib/gatewaySettings.ts';
 import { createUuid, isUuid } from '../lib/ids.ts';
 import { buildDocumentRecipients } from '../lib/documentRecipients.ts';
-import { parseCSV } from '../lib/csv.ts';
+import { escapeSpreadsheetCsvCell, parseCSV } from '../lib/csv.ts';
 import { normalizeSmsPhone } from '../lib/phoneNumber.ts';
 import { validateCampaignDispatch } from '../lib/campaignDispatchValidation.ts';
 import { isCampaignRecord } from '../lib/campaignRecord.ts';
+import {
+  parseStoredSettings,
+  validateRemoteSendSetting,
+  validateSettings,
+} from '../lib/settingsValidation.ts';
+import {
+  getConnectionTestError,
+  isSuccessfulConnectionTestStatus,
+} from '../lib/connectionTestError.ts';
 import {
   canResumeCampaignQueue,
   resolveCampaignQueueStatus,
@@ -51,6 +60,102 @@ function assert(condition: boolean, testName: string) {
 }
 
 async function runTests() {
+  const defaultSettings = {
+    apiBaseUrl: 'http://10.0.2.2:8000',
+    delayBetweenMs: 500,
+    batchSize: 50,
+    maxRetryAttempts: 3,
+    enableRemoteSend: false,
+  };
+  const defaultStoredSettings = {
+    apiBaseUrl: null,
+    delayBetweenMs: null,
+    batchSize: null,
+    maxRetryAttempts: null,
+    enableRemoteSend: null,
+  };
+
+  console.log('\n=== 0. اختبار تحميل الإعدادات المحلية ===');
+  const defaultsLoaded = parseStoredSettings(defaultStoredSettings, defaultSettings);
+  assert(
+    defaultsLoaded.batchSize === defaultSettings.batchSize &&
+      defaultsLoaded.enableRemoteSend === false,
+    'استخدام القيم الافتراضية للمفاتيح غير المحفوظة فقط',
+  );
+  let invalidStoredSettingsRejected = false;
+  try {
+    parseStoredSettings(
+      { ...defaultStoredSettings, batchSize: 'NaN' },
+      defaultSettings,
+    );
+  } catch (error) {
+    invalidStoredSettingsRejected =
+      error instanceof Error && error.message.includes('حجم الدفعة');
+  }
+  assert(invalidStoredSettingsRejected, 'رفض إعداد محفوظ غير رقمي مع توضيح المفتاح');
+  let unsafeStoredPreferencesRejected = false;
+  try {
+    parseStoredSettings(
+      { ...defaultStoredSettings, batchSize: '201' },
+      defaultSettings,
+    );
+  } catch {
+    unsafeStoredPreferencesRejected = true;
+  }
+  assert(unsafeStoredPreferencesRejected, 'رفض حجم دفعة محفوظ خارج المجال المدعوم');
+  let invalidSendFlagRejected = false;
+  try {
+    parseStoredSettings(
+      { ...defaultStoredSettings, enableRemoteSend: 'yes' },
+      defaultSettings,
+    );
+  } catch {
+    invalidSendFlagRejected = true;
+  }
+  assert(invalidSendFlagRejected, 'رفض قيمة غامضة لمفتاح تفعيل الإرسال');
+  assert(
+    validateSettings({ batchSize: Number.NaN }) !== null,
+    'رفض حجم دفعة غير رقمي قبل حفظ الإعدادات',
+  );
+  assert(
+    validateSettings({ delayBetweenMs: 1.5 }) !== null,
+    'رفض تأخير كسري قبل حفظ الإعدادات',
+  );
+  assert(
+    validateSettings({ maxRetryAttempts: Number.MAX_SAFE_INTEGER + 1 }) !== null,
+    'رفض عدد محاولات يتجاوز مجال الأعداد الآمنة',
+  );
+  assert(
+    validateSettings({ batchSize: 50, delayBetweenMs: 500, maxRetryAttempts: 3 }) === null,
+    'قبول إعدادات صحيحة قبل حفظها',
+  );
+  assert(
+    validateRemoteSendSetting(false) === null && validateRemoteSendSetting(true) === null,
+    'قبول قيم boolean صريحة لتفعيل الإرسال',
+  );
+  assert(
+    validateRemoteSendSetting('false') !== null && validateRemoteSendSetting(1) !== null,
+    'رفض قيم غير منطقية لتفعيل الإرسال قبل حفظها',
+  );
+  const timeoutError = new Error('request aborted');
+  timeoutError.name = 'AbortError';
+  assert(
+    getConnectionTestError(timeoutError).includes('انتهت مهلة'),
+    'إظهار سبب انتهاء مهلة اختبار اتصال البوابة',
+  );
+  assert(
+    getConnectionTestError(new Error('Network unavailable')) === 'Network unavailable',
+    'إظهار سبب خطأ الشبكة بدلاً من رسالة اتصال عامة',
+  );
+  assert(
+    isSuccessfulConnectionTestStatus(200) && isSuccessfulConnectionTestStatus(302),
+    'تصنيف استجابات النجاح والتحويل كاستجابات HTTP ناجحة',
+  );
+  assert(
+    !isSuccessfulConnectionTestStatus(404) && !isSuccessfulConnectionTestStatus(503),
+    'تمييز استجابة HTTP غير الناجحة عن انقطاع الاتصال',
+  );
+
   console.log('\n=== 1. اختبار سياسة التدفق والتأخير (Throttle Policy) ===');
 
   // 1.1 فحص تحليل Retry-After
@@ -177,6 +282,20 @@ async function runTests() {
     semicolonCsv.headers.length === 2 &&
       semicolonCsv.rows[0][1] === 'رسالة جاهزة',
     'اكتشاف فاصل CSV المنقوط الشائع في إعدادات اللغة العربية',
+  );
+  assert(
+    escapeSpreadsheetCsvCell('=HYPERLINK("https://example.test")') ===
+      `"'=HYPERLINK(""https://example.test"")"`,
+    'تحييد خلايا CSV التي تبدأ بصيغة جداول محتملة مع حفظ الاقتباسات',
+  );
+  assert(
+    escapeSpreadsheetCsvCell('\t@SUM(1,1)') === `"'	@SUM(1,1)"` &&
+      escapeSpreadsheetCsvCell('+966500000000') === `"'+966500000000"`,
+    'تحييد الصيغ بعد الفراغات وحماية رقم الهاتف الذي يبدأ بعلامة زائد',
+  );
+  assert(
+    escapeSpreadsheetCsvCell('رسالة "جاهزة"') === `"رسالة ""جاهزة"""`,
+    'الحفاظ على قيم CSV العادية مع تهريب علامات الاقتباس',
   );
   let rejectedPartialDocument = false;
   try {

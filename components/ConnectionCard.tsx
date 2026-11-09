@@ -4,6 +4,7 @@ import { Pencil, Trash2, Wifi, WifiOff } from 'lucide-react-native';
 import { formStyles } from '@/components/FormField';
 import { deleteGatewayConnection, testGatewayConnection } from '@/lib/gatewaySettings';
 import type { ConnectionTestResult, GatewayConnection } from '@/lib/gatewaySettings';
+import { isSuccessfulConnectionTestStatus } from '@/lib/connectionTestError';
 import { colors, fonts, spacing } from '@/constants/theme';
 
 type ConnectionCardProps = {
@@ -99,7 +100,9 @@ export function ConnectionCard({ connection, disabled, onEdit, onDeleted }: Conn
         </View>
       </View>
 
-      {test.status === 'done' && test.result.reachable ? (
+      {test.status === 'done' &&
+      test.result.reachable &&
+      (test.result.status === null || isSuccessfulConnectionTestStatus(test.result.status)) ? (
         <View style={formStyles.successRow}>
           <Wifi size={16} color={colors.success[600]} strokeWidth={2} />
           <Text style={formStyles.successText}>
@@ -108,10 +111,25 @@ export function ConnectionCard({ connection, disabled, onEdit, onDeleted }: Conn
         </View>
       ) : null}
 
+      {test.status === 'done' &&
+      test.result.reachable &&
+      test.result.status !== null &&
+      !isSuccessfulConnectionTestStatus(test.result.status) ? (
+        <View style={formStyles.successRow}>
+          <Wifi size={16} color={colors.error[600]} strokeWidth={2} />
+          <Text style={formStyles.errorText}>
+            تم الوصول إلى الخدمة، لكنها أعادت استجابة HTTP غير ناجحة ({test.result.status}).
+          </Text>
+        </View>
+      ) : null}
+
       {test.status === 'done' && !test.result.reachable ? (
         <View style={formStyles.successRow}>
           <WifiOff size={16} color={colors.error[600]} strokeWidth={2} />
-          <Text style={formStyles.errorText}>تعذر الوصول إلى العنوان. تأكد من صحته ومن عمل الخدمة.</Text>
+          <Text style={formStyles.errorText}>
+            {test.result.error ??
+              `تعذر الوصول إلى العنوان. تأكد من صحته ومن عمل الخدمة.${test.result.status ? ` (HTTP ${test.result.status})` : ''}`}
+          </Text>
         </View>
       ) : null}
 

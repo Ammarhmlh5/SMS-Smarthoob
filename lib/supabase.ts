@@ -1,12 +1,25 @@
 import { createClient } from '@supabase/supabase-js';
 
-const supabaseUrl = process.env.EXPO_PUBLIC_SUPABASE_URL;
-const supabaseAnonKey = process.env.EXPO_PUBLIC_SUPABASE_ANON_KEY;
+const supabaseUrl = process.env.EXPO_PUBLIC_SUPABASE_URL?.trim();
+const supabaseAnonKey = process.env.EXPO_PUBLIC_SUPABASE_ANON_KEY?.trim();
 
-if (!supabaseUrl || !supabaseAnonKey) {
-  throw new Error('Supabase configuration is missing');
+function isValidSupabaseUrl(value: string | undefined): value is string {
+  if (!value) return false;
+  try {
+    const url = new URL(value);
+    return url.protocol === 'https:' || url.protocol === 'http:';
+  } catch {
+    return false;
+  }
 }
 
-export const supabase = createClient(supabaseUrl, supabaseAnonKey, {
+export const isSupabaseConfigured =
+  isValidSupabaseUrl(supabaseUrl) && Boolean(supabaseAnonKey?.trim());
+
+const clientUrl =
+  isSupabaseConfigured && supabaseUrl ? supabaseUrl : 'https://supabase-not-configured.invalid';
+const clientKey = isSupabaseConfigured && supabaseAnonKey ? supabaseAnonKey : 'preview-disabled';
+
+export const supabase = createClient(clientUrl, clientKey, {
   auth: { persistSession: true, autoRefreshToken: true, detectSessionInUrl: false },
 });

@@ -129,9 +129,9 @@ export function SendingPreferencesForm({
       await setEnableRemoteSend(value);
       setEnableRemoteSendState(value);
       onAppSettingsSaved({ ...appSettings, enableRemoteSend: value });
-    } catch {
-      // في حال فشل التخزين نعود للقيمة السابقة
+    } catch (err) {
       setEnableRemoteSendState(!value);
+      setError(err instanceof Error ? err.message : 'تعذر حفظ إعداد تفعيل الإرسال.');
     } finally {
       setTogglingRemoteSend(false);
     }
