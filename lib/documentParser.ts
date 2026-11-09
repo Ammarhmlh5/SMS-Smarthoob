@@ -3,8 +3,9 @@
  * Uses expo-document-picker for native file selection
  */
 
-import * as FileSystem from 'expo-file-system';
+import * as FileSystem from 'expo-file-system/legacy';
 import * as DocumentPicker from 'expo-document-picker';
+import { parseCSV } from '@/lib/csv';
 
 export type ColumnInfo = {
   name: string;
@@ -109,44 +110,6 @@ async function pickDocumentWeb(): Promise<{ uri: string; name: string } | null> 
     input.onerror = () => resolve(null);
     input.click();
   });
-}
-
-// =====================
-// Simple CSV Parser
-// =====================
-
-function parseCSV(content: string): { headers: string[]; rows: string[][] } {
-  const lines = content.split(/\r?\n/).filter(line => line.trim());
-  
-  if (lines.length === 0) {
-    return { headers: [], rows: [] };
-  }
-
-  const parseLine = (line: string): string[] => {
-    const result: string[] = [];
-    let current = '';
-    let inQuotes = false;
-    
-    for (let i = 0; i < line.length; i++) {
-      const char = line[i];
-      
-      if (char === '"') {
-        inQuotes = !inQuotes;
-      } else if (char === ',' && !inQuotes) {
-        result.push(current.trim());
-        current = '';
-      } else {
-        current += char;
-      }
-    }
-    result.push(current.trim());
-    return result;
-  };
-
-  const headers = parseLine(lines[0]);
-  const rows = lines.slice(1).map(parseLine);
-
-  return { headers, rows };
 }
 
 // =====================
@@ -255,8 +218,10 @@ export async function parseDocumentFile(uri: string, fileName: string): Promise<
     if (uri.startsWith('data:')) {
       // Web: Extract content from data URL
       const base64 = uri.split(',')[1];
-      content = atob(base64);
-      console.log('Parsed web data URL');
+      if (!base64) throw new Error('محتوى الملف المختار فارغ.');
+      const binary = atob(base64);
+      const bytes = Uint8Array.from(binary, (character) => character.charCodeAt(0));
+      content = new TextDecoder('utf-8').decode(bytes);
     } else {
       // Native: Read from file system
       content = await FileSystem.readAsStringAsync(uri);
@@ -265,9 +230,12 @@ export async function parseDocumentFile(uri: string, fileName: string): Promise<
     
     const { headers, rows } = parseCSV(content);
     console.log('CSV parsed - headers:', headers, 'rows:', rows.length);
-    
+
     if (headers.length === 0) {
       throw new Error('الملف فارغ أو غير صالح');
+    }
+    if (rows.some((row) => row.length !== headers.length)) {
+      throw new Error('بعض صفوف CSV لا تطابق عدد الأعمدة في رأس الملف.');
     }
 
     const columnInfo: Record<string, ColumnInfo> = {};

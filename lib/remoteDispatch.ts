@@ -4,17 +4,24 @@
  * - سحب الرسائل المعلقة من قائمة الانتظار المحلية (SQLite outgoing_messages)
  * - التحقق من صلاحية الإرسال عبر Send Gate
  * - تطبيق سياسة التأخير والتدفق (Throttle Policy)
- * - استدعاء دالة hoodhad-send السحابية مع ترويسة X-Correlation-Id
+ * - إرسال الرسائل مباشرة إلى بوابة المستخدم مع ترويسة Authorization
  * - تحديث حالات الرسائل (SENT, RETRY_WAITING, FAILED, BLOCKED)
  */
 
 import { database } from './database';
 import type { OutgoingMessage } from './database';
-import { supabase } from './supabase';
+import {
+  CampaignClaimCheckError,
+  CampaignClaimLostError,
+  sendGatewayMessageWithRetry,
+} from './gatewayDelivery';
+import { getGatewayConnection } from './gatewaySettings';
 import { evaluateSendGate } from './sendGuard';
 import { loadSettings } from './settingsStore';
 import type { AppSettings } from './settingsStore';
-import { calculateEffectiveDelayMs, isRetryableError, parseRetryAfterMs } from './throttlePolicy';
+import { calculateEffectiveDelayMs } from './throttlePolicy';
+import { CAMPAIGN_CLAIM_HEARTBEAT_MS } from './campaignClaimLease';
+import { createUuid } from './ids';
 
 export interface DispatchBatchResult {
   dispatched: number;
@@ -23,13 +30,6 @@ export interface DispatchBatchResult {
   retried: number;
   blocked: boolean;
   blockReason?: string;
-}
-
-/**
- * وظيفة مساعدة لتوليد معرف فريد (UUID / Correlation ID)
- */
-function generateCorrelationId(): string {
-  return 'corr-' + Date.now().toString(36) + '-' + Math.random().toString(36).substring(2, 9);
 }
 
 /**
@@ -45,7 +45,8 @@ function sleep(ms: number): Promise<void> {
 export async function dispatchNextBatch(
   campaignId: string,
   gatewayId: string,
-  customSettings?: AppSettings
+  customSettings?: AppSettings,
+  onProgress?: (stats: { sent: number; failed: number; pending: number; total: number }) => void,
 ): Promise<DispatchBatchResult> {
   const settings = customSettings ?? (await loadSettings());
 
@@ -67,9 +68,16 @@ export async function dispatchNextBatch(
     };
   }
 
-  // 2. تحميل الرسائل المعلقة
+  const connection = await getGatewayConnection(gatewayId);
+
+  // 2. حجز الرسائل المعلقة حصرياً قبل إرسالها لمنع تشغيلها مرتين بالتوازي
   const batchSize = Math.max(1, settings.batchSize || 50);
-  const messages = await database.getPendingOutgoingMessages(batchSize, campaignId);
+  const correlationId = createUuid();
+  const messages = await database.claimPendingOutgoingMessages(
+    batchSize,
+    campaignId,
+    correlationId,
+  );
 
   if (messages.length === 0) {
     return {
@@ -80,107 +88,97 @@ export async function dispatchNextBatch(
       blocked: false,
     };
   }
-
-  // 3. تحديث حالة الرسائل إلى SENDING
-  for (const msg of messages) {
-    await database.updateOutgoingStatus(msg.id, 'SENDING');
-  }
-
-  // 4. تطبيق التأخير الأساسي
-  const baseDelay = calculateEffectiveDelayMs(settings, 0);
-  if (baseDelay > 0) {
-    await sleep(baseDelay);
-  }
-
-  const correlationId = generateCorrelationId();
   let sentCount = 0;
   let failedCount = 0;
   let retriedCount = 0;
+  const baseDelay = calculateEffectiveDelayMs(settings, 0);
+  const heartbeat = setInterval(() => {
+    void database.refreshClaimedOutgoingMessages(correlationId).catch((error) => {
+      console.warn('تعذر تجديد حجز رسائل الحملة:', error);
+    });
+  }, CAMPAIGN_CLAIM_HEARTBEAT_MS);
 
   try {
-    // 5. استدعاء دالة hoodhad-send السحابية
-    const { data, error } = await supabase.functions.invoke('hoodhad-send', {
-      body: {
-        action: 'send_campaign',
-        campaign_id: campaignId,
-        gateway_id: gatewayId,
-        recipients: messages.map((m) => ({
-          phone: m.phone,
-          message: m.message,
-        })),
-      },
-      headers: {
-        'X-Correlation-Id': correlationId,
-      },
-    });
+    for (let index = 0; index < messages.length; index += 1) {
+      const msg = messages[index];
+      const recipientId = getRecipientId(msg);
+      if (index > 0 && baseDelay > 0) await sleep(baseDelay);
 
-    if (error) {
-      throw error;
-    }
-
-    // 6. معالجة نتائج الرد الناجح
-    const results = (data?.results as Array<{ phone: string; status: string; error?: string }>) || [];
-    const resultMap = new Map<string, { status: string; error?: string }>();
-    for (const r of results) {
-      resultMap.set(r.phone, r);
-    }
-
-    for (const msg of messages) {
-      const itemRes = resultMap.get(msg.phone);
-      if (itemRes && itemRes.status === 'sent') {
-        sentCount++;
-        await database.updateOutgoingStatus(msg.id, 'SENT', {
-          correlationId,
-        });
-      } else {
-        // فشل فردي للمستلم
-        const errMsg = itemRes?.error || 'فشل إرسال الرسالة';
-        if (msg.retry_count + 1 < msg.max_retry_attempts) {
-          retriedCount++;
-          await database.updateOutgoingStatus(msg.id, 'RETRY_WAITING', {
-            error: errMsg,
-            correlationId,
-            incrementRetry: true,
-          });
-        } else {
-          failedCount++;
-          await database.updateOutgoingStatus(msg.id, 'FAILED', {
-            error: errMsg,
-            correlationId,
-          });
+      let deliveryError: unknown;
+      let deliveryFailed = false;
+      try {
+        await sendGatewayMessageWithRetry(
+          connection,
+          msg.phone,
+          msg.message,
+          Math.max(0, msg.max_retry_attempts - msg.retry_count),
+          settings,
+          async (error) => {
+            retriedCount += 1;
+            const updated = await database.updateOutgoingStatus(msg.id, 'SENDING', {
+              error: error instanceof Error ? error.message : 'تعذر إرسال الرسالة.',
+              correlationId,
+              incrementRetry: true,
+            });
+            if (!updated) throw new CampaignClaimLostError();
+          },
+          fetch,
+          () => database.startClaimedOutgoingMessageAttempt(msg.id, correlationId),
+        );
+      } catch (error) {
+        if (error instanceof CampaignClaimLostError || error instanceof CampaignClaimCheckError) {
+          throw error;
         }
+        deliveryFailed = true;
+        deliveryError = error;
       }
-    }
-  } catch (err: unknown) {
-    // 7. معالجة أخطاء الشبكة أو الخادم للدفعة بأكملها
-    const errMsg = err instanceof Error ? err.message : 'خطأ أثناء الإرسال';
-    const retryable = isRetryableError(err);
 
-    for (const msg of messages) {
-      if (retryable && msg.retry_count + 1 < msg.max_retry_attempts) {
-        retriedCount++;
-        await database.updateOutgoingStatus(msg.id, 'RETRY_WAITING', {
-          error: errMsg,
+      if (deliveryFailed) {
+        const errorMessage =
+          deliveryError instanceof Error ? deliveryError.message : 'تعذر إرسال الرسالة.';
+        const updated = await database.completeOutgoingMessage(
+          msg.id,
+          'FAILED',
           correlationId,
-          incrementRetry: true,
-        });
+          recipientId,
+          errorMessage,
+        );
+        if (!updated) throw new CampaignClaimLostError();
+        failedCount += 1;
       } else {
-        failedCount++;
-        await database.updateOutgoingStatus(msg.id, 'FAILED', {
-          error: errMsg,
+        const updated = await database.completeOutgoingMessage(
+          msg.id,
+          'SENT',
           correlationId,
-        });
+          recipientId,
+        );
+        if (!updated) throw new CampaignClaimLostError();
+        sentCount += 1;
       }
-    }
-  }
 
-  return {
-    dispatched: messages.length,
-    sent: sentCount,
-    failed: failedCount,
-    retried: retriedCount,
-    blocked: false,
-  };
+      const stats = await database.getCampaignQueueStats(campaignId);
+      onProgress?.({ sent: stats.sent, failed: stats.failed, pending: stats.pending, total: stats.total });
+    }
+
+    return {
+      dispatched: messages.length,
+      sent: sentCount,
+      failed: failedCount,
+      retried: retriedCount,
+      blocked: false,
+    };
+  } finally {
+    clearInterval(heartbeat);
+    await database.releaseClaimedOutgoingMessages(correlationId);
+  }
+}
+
+function getRecipientId(message: OutgoingMessage): string | null {
+  if (!message.payload_json) return null;
+  const payload: unknown = JSON.parse(message.payload_json);
+  if (typeof payload !== 'object' || payload === null) return null;
+  const recipientId = (payload as Record<string, unknown>).recipientId;
+  return typeof recipientId === 'string' ? recipientId : null;
 }
 
 /**
@@ -189,9 +187,10 @@ export async function dispatchNextBatch(
 export async function processFullCampaignDispatch(
   campaignId: string,
   gatewayId: string,
-  onProgress?: (stats: { sent: number; failed: number; pending: number; total: number }) => void
+  onProgress?: (stats: { sent: number; failed: number; pending: number; total: number }) => void,
+  customSettings?: AppSettings,
 ): Promise<{ sent: number; failed: number; total: number; blocked: boolean; blockReason?: string }> {
-  const settings = await loadSettings();
+  const settings = customSettings ?? (await loadSettings());
 
   while (true) {
     const stats = await database.getCampaignQueueStats(campaignId);
@@ -200,6 +199,9 @@ export async function processFullCampaignDispatch(
     }
 
     if (stats.pending === 0) {
+      if (stats.sending > 0) {
+        throw new Error('الحملة قيد المعالجة من عملية إرسال أخرى.');
+      }
       return {
         sent: stats.sent,
         failed: stats.failed,
@@ -208,13 +210,14 @@ export async function processFullCampaignDispatch(
       };
     }
 
-    const batchRes = await dispatchNextBatch(campaignId, gatewayId, settings);
+    const batchRes = await dispatchNextBatch(campaignId, gatewayId, settings, onProgress);
 
     if (batchRes.blocked) {
+      const finalStats = await database.getCampaignQueueStats(campaignId);
       return {
-        sent: stats.sent,
-        failed: stats.failed,
-        total: stats.total,
+        sent: finalStats.sent,
+        failed: finalStats.failed + finalStats.blocked,
+        total: finalStats.total,
         blocked: true,
         blockReason: batchRes.blockReason,
       };
@@ -222,7 +225,17 @@ export async function processFullCampaignDispatch(
 
     // إذا لم يتم إرسال أي عنصر في الدفعة (مثلاً جميعها قيد الانتظار لموعد لاحق) نخرج لمنع حلقة لانهائية
     if (batchRes.dispatched === 0) {
+      const currentStats = await database.getCampaignQueueStats(campaignId);
+      if (currentStats.sending > 0) {
+        throw new Error('الحملة قيد المعالجة من عملية إرسال أخرى.');
+      }
       break;
+    }
+
+    const remaining = await database.getCampaignQueueStats(campaignId);
+    if (remaining.pending > 0) {
+      const batchDelay = calculateEffectiveDelayMs(settings, 0);
+      if (batchDelay > 0) await sleep(batchDelay);
     }
   }
 

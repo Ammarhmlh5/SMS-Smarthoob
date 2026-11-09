@@ -9,7 +9,7 @@ import { saveSendingConfig, setEnableRemoteSend } from '@/lib/settingsStore';
 import type { AppSettings } from '@/lib/settingsStore';
 import { colors, fonts, spacing } from '@/constants/theme';
 
-const BATCH_SIZE = { min: 10, max: 200, step: 10 };
+const BATCH_SIZE = { min: 10, max: 100, step: 10 };
 const RETRIES = { min: 0, max: 5, step: 1 };
 const DELAY_MS = { min: 0, max: 5000, step: 100 };
 
@@ -109,7 +109,7 @@ export function SendingPreferencesForm({
     setSaving(true);
     setError(null);
     try {
-      // حفظ في السحابة (Supabase) عبر gateway-settings
+      // حفظ إعدادات البوابة مباشرة في Supabase
       const result = await saveSendingPreferences({ batch_size: batchSize, max_retries: maxRetries });
       // حفظ الإعدادات المحلية في AsyncStorage
       await saveSendingConfig({ batchSize, delayBetweenMs, maxRetryAttempts: maxRetries });
@@ -140,7 +140,7 @@ export function SendingPreferencesForm({
   return (
     <View style={styles.form}>
       {/* حجم الدفعة */}
-      <Field label="عدد الرسائل في كل دفعة" Icon={Layers} hint="بين 10 و 200">
+      <Field label="عدد الرسائل في كل دفعة" Icon={Layers} hint="بين 10 و 100">
         <Stepper
           value={batchSize}
           unit="رسالة"

@@ -116,8 +116,11 @@ export function TemplateForm({ template, initialValues, onSaved, onCancel }: Tem
       let columns: string[] = [];
       let sampleData: Record<string, string> = {};
 
-      // 1. محاولة استدعاء خادم المعالجة أولاً
-      try {
+      if (lowerName.endsWith('.csv')) {
+        const localParsed = await parseDocumentFile(result.uri, result.name);
+        columns = localParsed.columns;
+        if (localParsed.records?.length) sampleData = localParsed.records[0];
+      } else {
         const userId = session?.user?.id || 'default';
         let uploadFile: any;
 
@@ -136,24 +139,8 @@ export function TemplateForm({ template, initialValues, onSaved, onCancel }: Tem
         }
 
         const parsed = await parseDocument(uploadFile, userId);
-        if (parsed.columns && parsed.columns.length > 0) {
-          columns = parsed.columns;
-          if (parsed.sampleData && parsed.sampleData.length > 0) {
-            sampleData = parsed.sampleData[0];
-          }
-        }
-      } catch (apiErr) {
-        console.warn('Backend parse failed or offline, checking local CSV parser:', apiErr);
-        // 2. إذا فشل السيرفر والملف CSV محلي، نستخدم المحلل الداخلي
-        if (!lowerName.endsWith('.pdf') && !lowerName.endsWith('.xlsx') && !lowerName.endsWith('.xls')) {
-          const localParsed = await parseDocumentFile(result.uri, result.name);
-          columns = localParsed.columns;
-          if (localParsed.records && localParsed.records.length > 0) {
-            sampleData = localParsed.records[0];
-          }
-        } else {
-          throw new Error('تحليل ملفات Excel و PDF يتطلب تشغيل خادم المعالجة، أو استخدام ملف CSV.');
-        }
+        columns = parsed.columns;
+        if (parsed.sampleData?.length) sampleData = parsed.sampleData[0];
       }
 
       if (columns.length === 0) {

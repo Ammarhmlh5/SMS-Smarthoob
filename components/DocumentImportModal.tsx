@@ -11,7 +11,6 @@ import {
   pickDocument, 
   parseDocumentFile,
   suggestMapping, 
-  getSampleRecords,
   type DocumentAnalysis, 
   type VariableMapping 
 } from '@/lib/documentParser';
@@ -57,11 +56,11 @@ export function DocumentImportModal({ variables, onMapped, onCancel }: Props) {
         return;
       }
 
-      const userId = session?.user?.id || 'default';
       let transformedDoc: DocumentAnalysis | null = null;
 
       // Determine MIME type
       const lowerName = result.name.toLowerCase();
+      const isCsv = lowerName.endsWith('.csv');
       const mimeType = lowerName.endsWith('.pdf')
         ? 'application/pdf'
         : lowerName.endsWith('.xlsx')
@@ -70,8 +69,10 @@ export function DocumentImportModal({ variables, onMapped, onCancel }: Props) {
         ? 'application/vnd.ms-excel'
         : 'text/csv';
 
-      // Attempt parsing via backend API first (supports PDF, Excel, AI analysis)
-      try {
+      if (isCsv) {
+        transformedDoc = await parseDocumentFile(result.uri, result.name);
+      } else {
+        const userId = session?.user?.id || 'default';
         let uploadFile: any;
         if (typeof window !== 'undefined' && typeof File !== 'undefined' && (result as any).file instanceof File) {
           uploadFile = (result as any).file;
@@ -89,13 +90,17 @@ export function DocumentImportModal({ variables, onMapped, onCancel }: Props) {
         }
 
         const parsed = await parseDocument(uploadFile, userId);
+        const records = parsed.records;
+        if (!records?.length || records.length !== parsed.rowCount) {
+          throw new Error('لم يُرجع محلل المستند جميع الصفوف؛ لا يمكن إنشاء حملة من عينة جزئية. أعد تصدير الملف بصيغة CSV لمعالجته على الهاتف.');
+        }
 
         transformedDoc = {
           columns: parsed.columns,
           columnInfo: {},
           rowCount: parsed.rowCount,
           fileName: result.name,
-          records: parsed.sampleData,
+          records,
           suggestedPhoneColumn: parsed.suggestedPhoneColumn,
           suggestedNameColumn: parsed.suggestedNameColumn,
         };
@@ -106,17 +111,12 @@ export function DocumentImportModal({ variables, onMapped, onCancel }: Props) {
               name: col.name,
               type: col.type as any,
               confidence: col.confidence,
-              sampleValues: [],
+              sampleValues: (parsed.sampleData ?? [])
+                .map((record) => record[col.name])
+                .filter((value): value is string => typeof value === 'string')
+                .slice(0, 5),
             };
           }
-        }
-      } catch (apiErr) {
-        console.warn('Backend parsing unavailable, checking local parser:', apiErr);
-        // Fallback to local file parser if it's CSV
-        if (!lowerName.endsWith('.pdf') && !lowerName.endsWith('.xlsx') && !lowerName.endsWith('.xls')) {
-          transformedDoc = await parseDocumentFile(result.uri, result.name);
-        } else {
-          throw apiErr;
         }
       }
 
@@ -190,7 +190,11 @@ export function DocumentImportModal({ variables, onMapped, onCancel }: Props) {
   const renderMappingStep = () => {
     if (!document) return null;
 
-    const sampleRecords = getSampleRecords(document.columns, document.columnInfo, 2);
+    const sampleRecords = document.records?.slice(0, 2) ?? [];
+    const hasPreparedMessage = document.columns.some((column) =>
+      /^(message|sms|message_body|sms_body|ready_message|prepared_message|رسالة جاهزة|رسالة_جاهزة|الرسالة الجاهزة|الرسالة_الجاهزة|نص الرسالة|نص_الرسالة|نص الرسالة الجاهزة|نص_الرسالة_الجاهزة|الرسالة)$/i.test(column.trim()),
+    );
+    const hasNoVariableMappings = Object.values(manualMappings).every((column) => !column);
 
     return (
       <ScrollView style={styles.mappingScroll} showsVerticalScrollIndicator={false}>
@@ -313,11 +317,18 @@ export function DocumentImportModal({ variables, onMapped, onCancel }: Props) {
 
             <Pressable
               onPress={handleConfirm}
-              disabled={Object.values(manualMappings).filter(Boolean).length === 0}
+              disabled={
+                variables.length > 0 &&
+                hasNoVariableMappings &&
+                !hasPreparedMessage
+              }
               style={({ pressed }) => [
                 styles.primaryButton,
                 pressed && styles.pressed,
-                Object.values(manualMappings).filter(Boolean).length === 0 && styles.disabled
+                variables.length > 0 &&
+                  hasNoVariableMappings &&
+                  !hasPreparedMessage &&
+                  styles.disabled
               ]}
             >
               <Check size={18} color={colors.neutral[0]} strokeWidth={2} />

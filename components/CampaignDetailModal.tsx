@@ -25,6 +25,8 @@ import {
 import { database } from '@/lib/database';
 import type { CampaignRecipient } from '@/lib/database';
 import type { Campaign } from '@/lib/campaigns';
+import { canResumeCampaignQueue } from '@/lib/campaignQueueStatus';
+import { isUncertainDeliveryError } from '@/lib/campaignClaimLease';
 import { colors, fonts, spacing } from '@/constants/theme';
 
 type FilterType = 'all' | 'sent' | 'failed' | 'pending';
@@ -34,6 +36,7 @@ interface CampaignDetailModalProps {
   visible: boolean;
   onClose: () => void;
   onRetryFailed?: (failedRecipients: CampaignRecipient[]) => void;
+  onResumeCampaign?: (campaign: Campaign) => void;
 }
 
 export function CampaignDetailModal({
@@ -41,31 +44,53 @@ export function CampaignDetailModal({
   visible,
   onClose,
   onRetryFailed,
+  onResumeCampaign,
 }: CampaignDetailModalProps) {
   const [recipients, setRecipients] = useState<CampaignRecipient[]>([]);
+  const [hasPendingQueue, setHasPendingQueue] = useState(false);
   const [loading, setLoading] = useState(false);
+  const [loadError, setLoadError] = useState<string | null>(null);
+  const [reloadAttempt, setReloadAttempt] = useState(0);
   const [filter, setFilter] = useState<FilterType>('all');
   const [exporting, setExporting] = useState(false);
+  const [exportError, setExportError] = useState<string | null>(null);
+  const [confirmingUncertainRetry, setConfirmingUncertainRetry] = useState(false);
 
   useEffect(() => {
+    let cancelled = false;
     if (visible && campaign) {
       setLoading(true);
+      setLoadError(null);
       setFilter('all');
-      database
-        .getRecipients(campaign.id)
-        .then((data) => {
+      setConfirmingUncertainRetry(false);
+      Promise.all([
+        database.getRecipients(campaign.id),
+        database.getCampaignQueueStats(campaign.id),
+      ])
+        .then(([data, stats]) => {
+          if (cancelled) return;
           setRecipients(data);
-        })
-        .catch(() => {
+          setHasPendingQueue(canResumeCampaignQueue(stats));
+        }, (error: unknown) => {
+          if (cancelled) return;
           setRecipients([]);
+          setHasPendingQueue(false);
+          setLoadError(
+            error instanceof Error ? error.message : 'تعذر تحميل تفاصيل الحملة من قاعدة البيانات.',
+          );
         })
         .finally(() => {
-          setLoading(false);
+          if (!cancelled) setLoading(false);
         });
     } else {
       setRecipients([]);
+      setHasPendingQueue(false);
+      setLoadError(null);
     }
-  }, [visible, campaign]);
+    return () => {
+      cancelled = true;
+    };
+  }, [visible, campaign?.id, reloadAttempt]);
 
   if (!campaign) return null;
 
@@ -75,10 +100,14 @@ export function CampaignDetailModal({
   });
 
   const failedRecipients = recipients.filter((r) => r.status === 'failed');
+  const uncertainRecipients = failedRecipients.filter((r) =>
+    isUncertainDeliveryError(r.error_message),
+  );
 
   const handleExportCSV = async () => {
     if (recipients.length === 0) return;
     setExporting(true);
+    setExportError(null);
     try {
       // Header row in Arabic
       const headers = ['رقم الهاتف', 'اسم المستلم', 'الحالة', 'تاريخ الإرسال', 'نص الرسالة', 'سبب الخطأ'];
@@ -114,12 +143,20 @@ export function CampaignDetailModal({
       }
     } catch (err) {
       console.warn('Failed to export campaign CSV:', err);
+      setExportError(
+        err instanceof Error ? err.message : 'تعذر تصدير تقرير الحملة. حاول مرة أخرى.',
+      );
     } finally {
       setExporting(false);
     }
   };
 
-  const renderStatusIcon = (status: CampaignRecipient['status']) => {
+  const renderStatusIcon = (recipient: CampaignRecipient) => {
+    if (isUncertainDeliveryError(recipient.error_message)) {
+      return <AlertCircle size={16} color={colors.warning[600]} strokeWidth={2} />;
+    }
+
+    const { status } = recipient;
     switch (status) {
       case 'sent':
         return <CheckCircle2 size={16} color={colors.success[600]} strokeWidth={2} />;
@@ -130,7 +167,10 @@ export function CampaignDetailModal({
     }
   };
 
-  const getStatusText = (status: CampaignRecipient['status']) => {
+  const getStatusText = (recipient: CampaignRecipient) => {
+    if (isUncertainDeliveryError(recipient.error_message)) return 'النتيجة غير مؤكدة';
+
+    const { status } = recipient;
     switch (status) {
       case 'sent':
         return 'تم الإرسال';
@@ -191,17 +231,66 @@ export function CampaignDetailModal({
 
           {/* Action Buttons Row: Retry Failed & Export CSV */}
           <View style={styles.actionsContainer}>
-            {failedRecipients.length > 0 && onRetryFailed ? (
+            {hasPendingQueue && onResumeCampaign ? (
               <Pressable
                 accessibilityRole="button"
-                onPress={() => onRetryFailed(failedRecipients)}
+                onPress={() => onResumeCampaign(campaign)}
                 style={({ pressed }) => [styles.retryAllButton, pressed && styles.pressed]}
               >
                 <RefreshCw size={15} color={colors.neutral[0]} strokeWidth={2} />
-                <Text style={styles.retryAllText}>
-                  إعادة إرسال الفاشلة ({failedRecipients.length})
-                </Text>
+                <Text style={styles.retryAllText}>استكمال الرسائل المتبقية</Text>
               </Pressable>
+            ) : null}
+
+            {failedRecipients.length > 0 && onRetryFailed ? (
+              confirmingUncertainRetry ? (
+                <View style={styles.uncertainRetryNotice}>
+                  <Text style={styles.uncertainRetryText}>
+                    ستُعاد جميع الرسائل الفاشلة ({failedRecipients.length})، ومنها{' '}
+                    {uncertainRecipients.length} بنتيجة غير مؤكدة. تحقق من سجل البوابة لتجنب
+                    التكرار.
+                  </Text>
+                  <View style={styles.uncertainRetryActions}>
+                    <Pressable
+                      accessibilityRole="button"
+                      onPress={() => onRetryFailed(failedRecipients)}
+                      style={({ pressed }) => [
+                        styles.uncertainConfirmButton,
+                        pressed && styles.pressed,
+                      ]}
+                    >
+                      <Text style={styles.uncertainConfirmText}>تأكيد إعادة الإرسال</Text>
+                    </Pressable>
+                    <Pressable
+                      accessibilityRole="button"
+                      onPress={() => setConfirmingUncertainRetry(false)}
+                      style={({ pressed }) => [
+                        styles.uncertainCancelButton,
+                        pressed && styles.pressed,
+                      ]}
+                    >
+                      <Text style={styles.uncertainCancelText}>إلغاء</Text>
+                    </Pressable>
+                  </View>
+                </View>
+              ) : (
+                <Pressable
+                  accessibilityRole="button"
+                  onPress={() => {
+                    if (uncertainRecipients.length > 0) {
+                      setConfirmingUncertainRetry(true);
+                    } else {
+                      onRetryFailed(failedRecipients);
+                    }
+                  }}
+                  style={({ pressed }) => [styles.retryAllButton, pressed && styles.pressed]}
+                >
+                  <RefreshCw size={15} color={colors.neutral[0]} strokeWidth={2} />
+                  <Text style={styles.retryAllText}>
+                    إعادة إرسال الفاشلة ({failedRecipients.length})
+                  </Text>
+                </Pressable>
+              )
             ) : null}
 
             <Pressable
@@ -225,6 +314,12 @@ export function CampaignDetailModal({
               )}
             </Pressable>
           </View>
+          {exportError ? (
+            <View style={styles.exportError}>
+              <AlertCircle size={15} color={colors.error[700]} strokeWidth={2} />
+              <Text style={styles.exportErrorText}>{exportError}</Text>
+            </View>
+          ) : null}
 
           {/* Filter Pills */}
           <View style={styles.filtersRow}>
@@ -253,6 +348,22 @@ export function CampaignDetailModal({
               <ActivityIndicator color={colors.primary[700]} />
               <Text style={styles.loadingText}>جارٍ تحميل تفاصيل المستلمين…</Text>
             </View>
+          ) : loadError ? (
+            <View style={styles.centered}>
+              <AlertCircle size={28} color={colors.error[600]} />
+              <Text style={styles.loadErrorText}>{loadError}</Text>
+              <Pressable
+                accessibilityRole="button"
+                onPress={() => setReloadAttempt((attempt) => attempt + 1)}
+                style={({ pressed }) => [
+                  styles.loadRetryButton,
+                  pressed && styles.pressed,
+                ]}
+              >
+                <RefreshCw size={14} color={colors.primary[700]} strokeWidth={2} />
+                <Text style={styles.loadRetryText}>إعادة تحميل التفاصيل</Text>
+              </Pressable>
+            </View>
           ) : filteredRecipients.length === 0 ? (
             <View style={styles.centered}>
               <Users size={32} color={colors.neutral[400]} />
@@ -271,8 +382,8 @@ export function CampaignDetailModal({
                       </View>
                     </View>
                     <View style={styles.statusBadge}>
-                      {renderStatusIcon(r.status)}
-                      <Text style={styles.statusBadgeText}>{getStatusText(r.status)}</Text>
+                        {renderStatusIcon(r)}
+                        <Text style={styles.statusBadgeText}>{getStatusText(r)}</Text>
                     </View>
                   </View>
 
@@ -391,6 +502,54 @@ const styles = StyleSheet.create({
     color: colors.neutral[0],
     writingDirection: 'rtl',
   },
+  uncertainRetryNotice: {
+    flex: 1,
+    gap: spacing.xs,
+    padding: spacing.sm,
+    borderRadius: 12,
+    backgroundColor: colors.neutral[50],
+    borderWidth: 1,
+    borderColor: colors.warning[500],
+  },
+  uncertainRetryText: {
+    fontFamily: fonts.regular,
+    fontSize: 12,
+    color: colors.neutral[800],
+    textAlign: 'right',
+    writingDirection: 'rtl',
+  },
+  uncertainRetryActions: {
+    flexDirection: 'row-reverse',
+    gap: spacing.xs,
+  },
+  uncertainConfirmButton: {
+    flex: 1,
+    minHeight: 38,
+    alignItems: 'center',
+    justifyContent: 'center',
+    borderRadius: 10,
+    backgroundColor: colors.error[600],
+  },
+  uncertainConfirmText: {
+    fontFamily: fonts.semibold,
+    fontSize: 12,
+    color: colors.neutral[0],
+    writingDirection: 'rtl',
+  },
+  uncertainCancelButton: {
+    minHeight: 38,
+    paddingHorizontal: spacing.md,
+    alignItems: 'center',
+    justifyContent: 'center',
+    borderRadius: 10,
+    backgroundColor: colors.neutral[100],
+  },
+  uncertainCancelText: {
+    fontFamily: fonts.semibold,
+    fontSize: 12,
+    color: colors.neutral[700],
+    writingDirection: 'rtl',
+  },
   exportButton: {
     flex: 1,
     flexDirection: 'row-reverse',
@@ -407,6 +566,24 @@ const styles = StyleSheet.create({
     fontFamily: fonts.semibold,
     fontSize: 12,
     color: colors.primary[700],
+    writingDirection: 'rtl',
+  },
+  exportError: {
+    flexDirection: 'row-reverse',
+    alignItems: 'center',
+    gap: 6,
+    marginHorizontal: spacing.sm,
+    marginBottom: spacing.xs,
+    padding: spacing.sm,
+    borderRadius: 10,
+    backgroundColor: colors.error[50],
+  },
+  exportErrorText: {
+    flex: 1,
+    fontFamily: fonts.regular,
+    fontSize: 12,
+    color: colors.error[700],
+    textAlign: 'right',
     writingDirection: 'rtl',
   },
   filtersRow: {
@@ -520,6 +697,29 @@ const styles = StyleSheet.create({
     fontFamily: fonts.regular,
     fontSize: 13,
     color: colors.neutral[500],
+  },
+  loadErrorText: {
+    fontFamily: fonts.regular,
+    fontSize: 13,
+    color: colors.error[700],
+    textAlign: 'center',
+    writingDirection: 'rtl',
+  },
+  loadRetryButton: {
+    flexDirection: 'row-reverse',
+    alignItems: 'center',
+    gap: 6,
+    minHeight: 38,
+    paddingHorizontal: spacing.md,
+    borderRadius: 10,
+    backgroundColor: colors.primary[50],
+    borderWidth: 1,
+    borderColor: colors.primary[200],
+  },
+  loadRetryText: {
+    fontFamily: fonts.semibold,
+    fontSize: 12,
+    color: colors.primary[700],
   },
   emptyText: {
     fontFamily: fonts.regular,

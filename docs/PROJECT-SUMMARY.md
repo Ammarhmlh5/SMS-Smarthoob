@@ -46,11 +46,13 @@ SMS-Smarthoob/
 │   └── templates.ts                    # خدمات القوالب المحلية والمزامنة والاستبدال
 ├── supabase/                            # الخدمات السحابية وقواعد البيانات
 │   ├── functions/
-│   │   ├── gateway-settings/           # دالة إدارة وحماية مفاتيح البوابات
-│   │   └── hoodhad-send/               # دالة إرسال الرسائل عبر بوابات HodHod
+│   │   ├── gateway-settings/           # واجهة قديمة تعيد 410؛ الإعدادات مباشرة عبر Supabase
+│   │   └── hoodhad-send/               # واجهة قديمة تعيد 410؛ الإرسال مباشر من التطبيق
 │   └── migrations/                     # مخططات قاعدة بيانات PostgreSQL السحابية
 └── metro.config.js                      # تكوين حزم المترو ودعم WebAssembly (WASM) لـ SQLite
 ```
+
+تدار إعدادات البوابات عبر التطبيق مباشرة باستخدام Supabase وRLS. لا ترسل Edge Functions الرسائل؛ يرسل التطبيق إلى عنوان البوابة المحدد.
 
 ---
 

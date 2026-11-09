@@ -18,7 +18,7 @@
 | 🎛️ **[خطة إدارة الإعدادات والمزامنة (docs/SETTINGS-MANAGEMENT-PLAN.md)](./docs/SETTINGS-MANAGEMENT-PLAN.md)** | إدارة بوابات الإرسال، حجم الدفعات، مراقبة التزامن المحلي، وإعدادات خادم الـ AI. |
 | 📦 **[معمارية الإرسال والتدفق (docs/DELIVERY-ARCHITECTURE.md)](./docs/DELIVERY-ARCHITECTURE.md)** | الطبقات الأربع للإرسال المحمي، طوابير الرسائل، وسياسات Throttling و Retry. |
 | 🔍 **[تقرير تحليل الثغرات (docs/IMPLEMENTATION-GAPS.md)](./docs/IMPLEMENTATION-GAPS.md)** | مصفوفة مطابقة المتطلبات، الثغرات التي تم سدها، والميزات المنجزة. |
-| 🔌 **[ملاحظات الاتصال بالواجهات (docs/API-CONNECTION-NOTES.md)](./docs/API-CONNECTION-NOTES.md)** | تفاصيل الربط مع Supabase Edge Functions و FastAPI ونقاط النهاية. |
+| 🔌 **[ملاحظات الاتصال بالواجهات (docs/API-CONNECTION-NOTES.md)](./docs/API-CONNECTION-NOTES.md)** | تفاصيل الاتصال المباشر ببوابات الرسائل وخدمة تحليل المستندات. |
 | 🛡️ **[دليل تنفيذ طبقة الإرسال (docs/DELIVERY-IMPLEMENTATION-GUIDE.md)](./docs/DELIVERY-IMPLEMENTATION-GUIDE.md)** | دليل تطبيقي لحماية الإرسال وقائمة الانتظار وسياسات التدفق. |
 | 📈 **[خطة المرحلة التالية (docs/PHASE-NEXT-DELIVERY-PLAN.md)](./docs/PHASE-NEXT-DELIVERY-PLAN.md)** | مراحل بناء Send Gate، تفكيك المهام، ومصفوفة القبول النهائي. |
 
@@ -30,11 +30,11 @@
 - **الخطوط والسمات:** `@expo-google-fonts/cairo` بدعم كامل للغة العربية والاتجاه من اليمين لليسار (RTL).
 - **التخزين المحلي (Offline-First):** `expo-sqlite` (يدعم الهواتف والويب عبر WASM) وجدول طابور الإرسال `outgoing_messages`.
 - **التخزين الدائم للإعدادات:** `@react-native-async-storage/async-storage` مع مفتاح أمان الإرسال (Send Gate).
-- **الخدمات السحابية:** Supabase (Auth, PostgreSQL DB, Edge Functions `hoodhad-send`, `gateway-settings`).
+- **الخدمات السحابية:** Supabase (Auth, PostgreSQL, RLS والمزامنة). يتصل التطبيق ببوابات الرسائل مباشرة.
 - **معالجة المستندات والـ AI:**
   - محرك محلي سريع لملفات CSV في TypeScript (`lib/documentParser.ts`).
   - خادم ذكاء اصطناعي محلي بـ Python FastAPI لملفات PDF و Excel المعقدة (`E:\SmartHoop\backend`).
-- **طبقة الأمان وحماية الإرسال:** Send Gate (`lib/sendGuard.ts`) وسياسة التدفق والتأخير الأسي (`lib/throttlePolicy.ts`).
+- **طبقة الإرسال:** Send Gate (`lib/sendGuard.ts`) وطابور SQLite وسياسة التدفق والتأخير الأسي (`lib/throttlePolicy.ts`)؛ الإرسال من التطبيق مباشرة إلى البوابة.
 
 ---
 
@@ -68,8 +68,8 @@ npm run build:web
    - استيراد ملف فواتير العملاء (Excel أو CSV أو PDF).
    - مطابقة المتغيرات آلياً واكتشاف عمود الهاتف والاسم.
    - معاينة عينات من الرسائل الجاهزة بعد تعويض البيانات.
-4. **الإرسال والتتبع الآمن:**
-   - فحص شروط الأمان عبر Send Gate قبل أي إرسال فعلي.
-   - إرسال الرسائل على دفعات آمنة مع تتبع لحظي بنسبة الإنجاز (Progress Bar).
+4. **الإرسال والتتبع:**
+   - فحص شروط الإرسال عبر Send Gate قبل أي إرسال فعلي.
+   - إرسال مباشر من التطبيق إلى البوابة على دفعات مع تتبع التقدم.
    - إمكانية إعادة إرسال الرسائل الفاشلة فقط دون تكرار الناجحة.
    - تصدير تقارير الإرسال إلى ملفات Excel/CSV بترميز UTF-8 عربي.

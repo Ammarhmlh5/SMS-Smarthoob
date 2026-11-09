@@ -1,5 +1,6 @@
 import { supabase } from '@/lib/supabase';
-import { database } from '@/lib/database';
+import { database, type MessageTemplate as DatabaseMessageTemplate } from '@/lib/database';
+import { createUuid } from '@/lib/ids';
 
 export type MessageTemplate = {
   id: string;
@@ -18,6 +19,14 @@ export type TemplateInput = {
 };
 
 const GENERIC_ERROR = 'تعذر الاتصال بالخادم. حاول مرة أخرى.';
+
+function syncInBackground(): void {
+  void database.syncWithSupabase().then((result) => {
+    if (!result.success) console.warn('Template background sync failed:', result.message);
+  }).catch((error) => {
+    console.warn('Template background sync error:', error);
+  });
+}
 
 function isTemplate(value: unknown): value is MessageTemplate {
   if (typeof value !== 'object' || value === null) return false;
@@ -73,7 +82,7 @@ export async function createTemplate(input: TemplateInput, userId?: string): Pro
   const { data: { user } } = await supabase.auth.getUser();
   const effectiveUserId = userId || user?.id || 'default';
   const now = new Date().toISOString();
-  const id = `tmpl_${Date.now()}_${Math.random().toString(36).substring(2, 9)}`;
+  const id = createUuid();
 
   const newTemplate: MessageTemplate = {
     id,
@@ -87,10 +96,17 @@ export async function createTemplate(input: TemplateInput, userId?: string): Pro
   };
 
   try {
-    await database.createTemplate(newTemplate as any);
-    if (user) {
-      database.syncWithSupabase().catch(() => {});
-    }
+    const localTemplate: Omit<DatabaseMessageTemplate, 'sync_status'> = {
+      id,
+      title: newTemplate.title,
+      body: newTemplate.body,
+      user_id: effectiveUserId,
+      is_default: false,
+      created_at: now,
+      updated_at: now,
+    };
+    await database.createTemplate(localTemplate);
+    if (user) syncInBackground();
     return newTemplate;
   } catch (dbErr) {
     console.warn('Local create failed, trying cloud direct:', dbErr);
@@ -113,9 +129,7 @@ export async function updateTemplate(id: string, input: TemplateInput): Promise<
       body: input.body.trim(),
     });
     const { data: { user } } = await supabase.auth.getUser();
-    if (user) {
-      database.syncWithSupabase().catch(() => {});
-    }
+    if (user) syncInBackground();
     const updated = await database.getTemplate(id);
     if (updated) return updated;
   } catch (dbErr) {
@@ -137,9 +151,7 @@ export async function deleteTemplate(id: string): Promise<void> {
   try {
     await database.deleteTemplate(id);
     const { data: { user } } = await supabase.auth.getUser();
-    if (user) {
-      database.syncWithSupabase().catch(() => {});
-    }
+    if (user) syncInBackground();
     return;
   } catch (dbErr) {
     console.warn('Local delete failed, trying cloud direct:', dbErr);

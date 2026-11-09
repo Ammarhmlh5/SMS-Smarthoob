@@ -4,7 +4,16 @@
  */
 
 import * as SQLite from 'expo-sqlite';
+import { Platform } from 'react-native';
 import { supabase } from './supabase';
+import { resolveCampaignQueueStatus } from './campaignQueueStatus';
+import {
+  CAMPAIGN_CLAIM_LEASE_MS,
+  EXPIRED_CLAIM_ERROR,
+  getExpiredClaimRecoveryStatus,
+} from './campaignClaimLease';
+import { createUuid, isUuid } from './ids';
+import { validateCampaignDispatch } from './campaignDispatchValidation';
 
 const DB_NAME = 'smarthoop.db';
 
@@ -73,6 +82,7 @@ export interface SyncLog {
 export type OutgoingMessageStatus =
   | 'PENDING'
   | 'QUEUED'
+  | 'CLAIMED'
   | 'SENDING'
   | 'SENT'
   | 'FAILED'
@@ -103,19 +113,60 @@ export interface OutgoingMessage {
 class Database {
   private db: SQLite.SQLiteDatabase | null = null;
   private isInitialized = false;
+  private initializationPromise: Promise<void> | null = null;
+  private transactionTail: Promise<void> = Promise.resolve();
+
+  private async withTransaction<T>(
+    task: (transaction: SQLite.SQLiteDatabase) => Promise<T>,
+  ): Promise<T> {
+    let release!: () => void;
+    const previous = this.transactionTail;
+    this.transactionTail = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    await previous;
+
+    try {
+      let result!: T;
+      if (Platform.OS === 'web') {
+        await this.db!.withTransactionAsync(async () => {
+          result = await task(this.db!);
+        });
+      } else {
+        await this.db!.withExclusiveTransactionAsync(async (transaction) => {
+          result = await task(transaction);
+        });
+      }
+      return result;
+    } finally {
+      release();
+    }
+  }
 
   async initialize(): Promise<void> {
     if (this.isInitialized) return;
+    if (this.initializationPromise) return this.initializationPromise;
 
+    const initialization = this.initializeDatabase();
+    this.initializationPromise = initialization;
+    try {
+      await initialization;
+      this.isInitialized = true;
+    } finally {
+      if (this.initializationPromise === initialization) {
+        this.initializationPromise = null;
+      }
+    }
+  }
+
+  private async initializeDatabase(): Promise<void> {
     this.db = await SQLite.openDatabaseAsync(DB_NAME);
     await this.createTables();
-    this.isInitialized = true;
-    
-    // Run initial sync after establishing connection
-    await this.syncWithSupabase();
+    await this.migrateLegacyTemplateIds();
+    await this.recoverInterruptedCampaigns();
 
-    // Recovery: Convert any hanging 'SENDING' messages to 'RETRY_WAITING'
-    await this.resetSendingToRetryWaiting();
+    // Run initial sync after local queue recovery.
+    await this.syncWithSupabase();
   }
 
   private async createTables(): Promise<void> {
@@ -284,6 +335,74 @@ class Database {
     }
   }
 
+  private async migrateLegacyTemplateIds(): Promise<void> {
+    if (!this.db) return;
+
+    const legacyTemplates = await this.db.getAllAsync<{ id: string }>(
+      'SELECT id FROM templates WHERE is_default = 0',
+    );
+    const migrations = legacyTemplates
+      .filter((template) => !isUuid(template.id))
+      .map((template) => ({ oldId: template.id, newId: createUuid() }));
+    if (migrations.length === 0) return;
+
+    await this.db.execAsync('BEGIN TRANSACTION');
+    try {
+      for (const { oldId, newId } of migrations) {
+        await this.db.runAsync(
+          'UPDATE templates SET id = ?, sync_status = ? WHERE id = ?',
+          [newId, 'pending', oldId],
+        );
+        await this.db.runAsync(
+          'UPDATE campaigns SET template_id = ?, sync_status = ?, updated_at = ? WHERE template_id = ?',
+          [newId, 'pending', new Date().toISOString(), oldId],
+        );
+        await this.db.runAsync(
+          "UPDATE sync_log SET record_id = ? WHERE table_name = 'templates' AND record_id = ?",
+          [newId, oldId],
+        );
+
+        const templateSync = await this.db.getFirstAsync<{ id: number }>(
+          "SELECT id FROM sync_log WHERE table_name = 'templates' AND record_id = ? AND synced = 0 LIMIT 1",
+          [newId],
+        );
+        if (!templateSync) await this.logSync('templates', newId, 'update');
+
+        const campaignSync = await this.db.getAllAsync<{ id: string }>(
+          'SELECT id FROM campaigns WHERE template_id = ?',
+          [newId],
+        );
+        for (const campaign of campaignSync) {
+          const pendingCampaignSync = await this.db.getFirstAsync<{ id: number }>(
+            "SELECT id FROM sync_log WHERE table_name = 'campaigns' AND record_id = ? AND synced = 0 LIMIT 1",
+            [campaign.id],
+          );
+          if (!pendingCampaignSync) await this.logSync('campaigns', campaign.id, 'update');
+        }
+      }
+
+      const pendingTemplateSync = await this.db.getAllAsync<{ id: number; record_id: string }>(
+        "SELECT id, record_id FROM sync_log WHERE table_name = 'templates' AND synced = 0",
+      );
+      for (const item of pendingTemplateSync) {
+        if (!isUuid(item.record_id)) {
+          const localTemplate = await this.db.getFirstAsync<{ id: string }>(
+            'SELECT id FROM templates WHERE id = ?',
+            [item.record_id],
+          );
+          if (!localTemplate) {
+            await this.db.runAsync('UPDATE sync_log SET synced = 1 WHERE id = ?', [item.id]);
+          }
+        }
+      }
+
+      await this.db.execAsync('COMMIT');
+    } catch (error) {
+      await this.db.execAsync('ROLLBACK');
+      throw error;
+    }
+  }
+
   // =====================
   // Template Operations
   // =====================
@@ -344,8 +463,14 @@ class Database {
 
   async deleteTemplate(id: string): Promise<void> {
     if (!this.db) await this.initialize();
-    
-    await this.db!.runAsync('DELETE FROM templates WHERE id = ? AND is_default = 0', [id]);
+
+    const template = await this.db!.getFirstAsync<{ is_default: number }>(
+      'SELECT is_default FROM templates WHERE id = ?',
+      [id],
+    );
+    if (!template || template.is_default === 1) return;
+
+    await this.db!.runAsync('DELETE FROM templates WHERE id = ?', [id]);
     await this.logSync('templates', id, 'delete');
   }
 
@@ -394,6 +519,63 @@ class Database {
     return newCampaign;
   }
 
+  async createCampaignDispatch(
+    campaign: Omit<Campaign, 'sync_status'>,
+    recipients: Omit<CampaignRecipient, 'sync_status'>[],
+    gatewayId: string,
+    messages: { phone: string; message: string; payload?: unknown }[],
+    maxRetries: number,
+  ): Promise<void> {
+    validateCampaignDispatch(
+      campaign.id,
+      campaign.total_recipients,
+      recipients,
+      messages,
+    );
+    if (!this.db) await this.initialize();
+
+    const now = new Date().toISOString();
+    await this.withTransaction(async (transaction) => {
+      await transaction.runAsync(
+        `INSERT INTO campaigns (id, name, template_id, connection_id, status, total_recipients, sent_count, failed_count, user_id, created_at, updated_at, sync_status)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'pending')`,
+        [
+          campaign.id, campaign.name, campaign.template_id, campaign.connection_id,
+          campaign.status, campaign.total_recipients, campaign.sent_count, campaign.failed_count,
+          campaign.user_id, now, now,
+        ],
+      );
+      await transaction.runAsync(
+        'INSERT INTO sync_log (table_name, record_id, action, timestamp, synced) VALUES (?, ?, ?, ?, 0)',
+        ['campaigns', campaign.id, 'create', now],
+      );
+
+      for (let index = 0; index < recipients.length; index += 1) {
+        const recipient = recipients[index];
+        const message = messages[index];
+
+        await transaction.runAsync(
+          `INSERT INTO campaign_recipients (id, campaign_id, subscriber_phone, subscriber_name, message_body, status, sent_at, error_message, sync_status)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'synced')`,
+          [
+            recipient.id, recipient.campaign_id, recipient.subscriber_phone, recipient.subscriber_name,
+            recipient.message_body, recipient.status, recipient.sent_at, recipient.error_message,
+          ],
+        );
+        await transaction.runAsync(
+          `INSERT INTO outgoing_messages (
+             campaign_id, phone, message, gateway_id, status,
+             retry_count, max_retry_attempts, payload_json, created_at, updated_at
+           ) VALUES (?, ?, ?, ?, 'PENDING', 0, ?, ?, ?, ?)`,
+          [
+            campaign.id, message.phone, message.message, gatewayId, maxRetries,
+            message.payload ? JSON.stringify(message.payload) : null, now, now,
+          ],
+        );
+      }
+    });
+  }
+
   async updateCampaignStatus(id: string, status: Campaign['status'], sentCount?: number, failedCount?: number): Promise<void> {
     if (!this.db) await this.initialize();
     
@@ -416,12 +598,11 @@ class Database {
     for (const recipient of recipients) {
       await this.db!.runAsync(
         `INSERT INTO campaign_recipients (id, campaign_id, subscriber_phone, subscriber_name, message_body, status, sent_at, error_message, sync_status)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'pending')`,
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'synced')`,
         [recipient.id, recipient.campaign_id, recipient.subscriber_phone, recipient.subscriber_name,
          recipient.message_body, recipient.status, recipient.sent_at, recipient.error_message]
       );
       
-      await this.logSync('campaign_recipients', recipient.id, 'create');
     }
   }
 
@@ -439,11 +620,10 @@ class Database {
     
     const sentAt = status === 'sent' ? new Date().toISOString() : null;
     await this.db!.runAsync(
-      'UPDATE campaign_recipients SET status = ?, sent_at = COALESCE(?, sent_at), error_message = ?, sync_status = ? WHERE id = ?',
-      [status, sentAt, errorMessage || null, 'pending', id]
+      'UPDATE campaign_recipients SET status = ?, sent_at = COALESCE(?, sent_at), error_message = ? WHERE id = ?',
+      [status, sentAt, errorMessage || null, id]
     );
 
-    await this.logSync('campaign_recipients', id, 'update');
   }
 
   // =====================
@@ -517,11 +697,8 @@ class Database {
         'SELECT * FROM sync_log WHERE synced = 0 ORDER BY timestamp ASC LIMIT 50'
       );
 
-      if (pendingItems.length === 0) {
-        return { success: true, message: 'لا توجد عناصر للمزامنة' };
-      }
-
       // Process each pending item
+      let failedItems = 0;
       for (const item of pendingItems) {
         try {
           await this.syncItem(item);
@@ -538,6 +715,7 @@ class Database {
             [item.record_id]
           );
         } catch (error) {
+          failedItems += 1;
           console.error(`Failed to sync item ${item.id}:`, error);
         }
       }
@@ -545,7 +723,13 @@ class Database {
       // Pull latest from Supabase
       await this.pullFromSupabase();
 
-      return { success: true, message: `تم مزامنة ${pendingItems.length} عنصر` };
+      if (pendingItems.length === 0) {
+        return { success: true, message: 'لا توجد عناصر معلقة؛ تم تحديث البيانات السحابية' };
+      }
+
+      return failedItems > 0
+        ? { success: false, message: `تعذرت مزامنة ${failedItems} من ${pendingItems.length} عنصر` }
+        : { success: true, message: `تم مزامنة ${pendingItems.length} عنصر` };
     } catch (error) {
       console.error('Sync failed:', error);
       return { success: false, message: 'فشلت المزامنة مع الخادم' };
@@ -553,8 +737,9 @@ class Database {
   }
 
   private async syncItem(item: SyncLog): Promise<void> {
-    const { data: { user } } = await supabase.auth.getUser();
-    if (!user) return;
+    const { data, error } = await supabase.auth.getUser();
+    if (error) throw error;
+    if (!data.user) throw new Error('يلزم تسجيل الدخول لمزامنة البيانات المحلية.');
 
     switch (item.table_name) {
       case 'templates':
@@ -563,34 +748,39 @@ class Database {
       case 'campaigns':
         await this.syncCampaign(item);
         break;
-      case 'gateway_connections':
-        await this.syncConnection(item);
-        break;
     }
   }
 
   private async syncTemplate(item: SyncLog): Promise<void> {
+    if (item.action === 'delete') {
+      if (!isUuid(item.record_id)) {
+        throw new Error(`معرف القالب المحذوف غير صالح للمزامنة: ${item.record_id}`);
+      }
+      const { error } = await supabase.from('message_templates').delete().eq('id', item.record_id);
+      if (error) throw error;
+      return;
+    }
+
     const template = await this.db!.getFirstAsync<MessageTemplate>(
       'SELECT * FROM templates WHERE id = ?',
       [item.record_id]
     );
 
     if (!template) return;
-
-    if (item.action === 'delete') {
-      await supabase.from('message_templates').delete().eq('id', item.record_id);
-    } else {
-      const { error } = await supabase.from('message_templates').upsert({
-        id: template.id,
-        title: template.title,
-        body: template.body,
-        user_id: template.user_id,
-        created_at: template.created_at,
-        updated_at: template.updated_at
-      }, { onConflict: 'id' });
-
-      if (error) throw error;
+    if (!isUuid(template.id)) {
+      throw new Error(`معرف القالب المحلي غير صالح للمزامنة: ${template.id}`);
     }
+
+    const { error } = await supabase.from('message_templates').upsert({
+      id: template.id,
+      title: template.title,
+      body: template.body,
+      user_id: template.user_id,
+      created_at: template.created_at,
+      updated_at: template.updated_at
+    }, { onConflict: 'id' });
+
+    if (error) throw error;
   }
 
   private async syncCampaign(item: SyncLog): Promise<void> {
@@ -601,13 +791,18 @@ class Database {
 
     if (!campaign) return;
 
+    if (!isUuid(campaign.id)) {
+      throw new Error(`معرف الحملة المحلية غير صالح للمزامنة: ${campaign.id}`);
+    }
+
     if (item.action === 'delete') {
-      await supabase.from('campaigns').delete().eq('id', item.record_id);
+      const { error } = await supabase.from('campaigns').delete().eq('id', item.record_id);
+      if (error) throw error;
     } else {
       const { error } = await supabase.from('campaigns').upsert({
         id: campaign.id,
         name: campaign.name,
-        template_id: campaign.template_id,
+        template_id: isUuid(campaign.template_id) ? campaign.template_id : null,
         connection_id: campaign.connection_id,
         status: campaign.status,
         total_recipients: campaign.total_recipients,
@@ -622,62 +817,60 @@ class Database {
     }
   }
 
-  private async syncConnection(item: SyncLog): Promise<void> {
-    const connection = await this.db!.getFirstAsync<GatewayConnection>(
-      'SELECT * FROM gateway_connections WHERE id = ?',
-      [item.record_id]
-    );
-
-    if (!connection) return;
-
-    if (item.action === 'delete') {
-      await supabase.from('gateway_connections').delete().eq('id', item.record_id);
-    } else {
-      const { error } = await supabase.from('gateway_connections').upsert({
-        id: connection.id,
-        name: connection.name,
-        api_key: connection.api_key,
-        provider: connection.provider,
-        user_id: connection.user_id,
-        created_at: connection.created_at,
-        updated_at: connection.updated_at
-      }, { onConflict: 'id' });
-
-      if (error) throw error;
-    }
-  }
-
   private async pullFromSupabase(): Promise<void> {
     const { data: { user } } = await supabase.auth.getUser();
     if (!user) return;
 
     // Pull templates
-    const { data: templates } = await supabase
+    const { data: templates, error: templatesError } = await supabase
       .from('message_templates')
       .select('*')
       .eq('user_id', user.id);
+    if (templatesError) throw templatesError;
 
     if (templates && templates.length > 0) {
       for (const template of templates) {
         await this.db!.runAsync(
-          `INSERT OR REPLACE INTO templates (id, title, body, user_id, is_default, created_at, updated_at, sync_status)
-           VALUES (?, ?, ?, ?, 0, ?, ?, 'synced')`,
+          `INSERT INTO templates (id, title, body, user_id, is_default, created_at, updated_at, sync_status)
+           VALUES (?, ?, ?, ?, 0, ?, ?, 'synced')
+           ON CONFLICT(id) DO UPDATE SET
+             title = excluded.title,
+             body = excluded.body,
+             user_id = excluded.user_id,
+             created_at = excluded.created_at,
+             updated_at = excluded.updated_at,
+             sync_status = 'synced'
+           WHERE templates.sync_status = 'synced'`,
           [template.id, template.title, template.body, template.user_id, template.created_at, template.updated_at]
         );
       }
     }
 
     // Pull campaigns
-    const { data: campaigns } = await supabase
+    const { data: campaigns, error: campaignsError } = await supabase
       .from('campaigns')
       .select('*')
       .eq('user_id', user.id);
+    if (campaignsError) throw campaignsError;
 
     if (campaigns && campaigns.length > 0) {
       for (const campaign of campaigns) {
         await this.db!.runAsync(
-          `INSERT OR REPLACE INTO campaigns (id, name, template_id, connection_id, status, total_recipients, sent_count, failed_count, user_id, created_at, updated_at, sync_status)
-           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'synced')`,
+          `INSERT INTO campaigns (id, name, template_id, connection_id, status, total_recipients, sent_count, failed_count, user_id, created_at, updated_at, sync_status)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'synced')
+           ON CONFLICT(id) DO UPDATE SET
+             name = excluded.name,
+             template_id = excluded.template_id,
+             connection_id = excluded.connection_id,
+             status = excluded.status,
+             total_recipients = excluded.total_recipients,
+             sent_count = excluded.sent_count,
+             failed_count = excluded.failed_count,
+             user_id = excluded.user_id,
+             created_at = excluded.created_at,
+             updated_at = excluded.updated_at,
+             sync_status = 'synced'
+           WHERE campaigns.sync_status = 'synced'`,
           [campaign.id, campaign.name, campaign.template_id, campaign.connection_id, campaign.status,
            campaign.total_recipients, campaign.sent_count, campaign.failed_count, campaign.user_id,
            campaign.created_at, campaign.updated_at]
@@ -685,21 +878,6 @@ class Database {
       }
     }
 
-    // Pull connections
-    const { data: connections } = await supabase
-      .from('gateway_connections')
-      .select('*')
-      .eq('user_id', user.id);
-
-    if (connections && connections.length > 0) {
-      for (const conn of connections) {
-        await this.db!.runAsync(
-          `INSERT OR REPLACE INTO gateway_connections (id, name, api_key, provider, user_id, created_at, updated_at, sync_status)
-           VALUES (?, ?, ?, ?, ?, ?, ?, 'synced')`,
-          [conn.id, conn.name, conn.api_key, conn.provider, conn.user_id, conn.created_at, conn.updated_at]
-        );
-      }
-    }
   }
 
   // =====================
@@ -736,31 +914,86 @@ class Database {
     }
   }
 
-  async getPendingOutgoingMessages(limit: number = 50, campaignId?: string): Promise<OutgoingMessage[]> {
+  async claimPendingOutgoingMessages(
+    limit: number,
+    campaignId: string,
+    correlationId: string,
+  ): Promise<OutgoingMessage[]> {
     if (!this.db) await this.initialize();
 
-    let query = `
-      SELECT * FROM outgoing_messages 
-      WHERE status IN ('PENDING', 'RETRY_WAITING')
-    `;
-    const params: (string | number)[] = [];
-
-    if (campaignId) {
-      query += ` AND campaign_id = ?`;
-      params.push(campaignId);
+    if (!Number.isInteger(limit) || limit < 1) {
+      throw new RangeError('حجم حجز الرسائل يجب أن يكون أكبر من صفر.');
     }
 
-    query += ` ORDER BY id ASC LIMIT ?`;
-    params.push(limit);
+    await this.recoverExpiredOutgoingClaims();
 
-    return this.db!.getAllAsync<OutgoingMessage>(query, params);
+    return this.withTransaction(async (transaction) => {
+      const candidates = await transaction.getAllAsync<OutgoingMessage>(
+        `SELECT * FROM outgoing_messages
+         WHERE campaign_id = ? AND status IN ('PENDING', 'RETRY_WAITING', 'QUEUED')
+         ORDER BY id ASC LIMIT ?`,
+        [campaignId, limit],
+      );
+      const claimed: OutgoingMessage[] = [];
+      const now = new Date().toISOString();
+
+      for (const candidate of candidates) {
+        const result = await transaction.runAsync(
+          `UPDATE outgoing_messages
+           SET status = 'CLAIMED', correlation_id = ?, updated_at = ?
+           WHERE id = ? AND status IN ('PENDING', 'RETRY_WAITING', 'QUEUED')`,
+          [correlationId, now, candidate.id],
+        );
+        if (result.changes === 1) {
+          claimed.push({ ...candidate, status: 'CLAIMED', correlation_id: correlationId });
+        }
+      }
+
+      return claimed;
+    });
+  }
+
+  async releaseClaimedOutgoingMessages(correlationId: string): Promise<void> {
+    if (!this.db) await this.initialize();
+    const now = new Date().toISOString();
+    await this.db!.runAsync(
+      `UPDATE outgoing_messages
+       SET status = 'RETRY_WAITING', updated_at = ?
+       WHERE correlation_id = ? AND status = 'CLAIMED'`,
+      [now, correlationId],
+    );
+  }
+
+  async refreshClaimedOutgoingMessages(correlationId: string): Promise<void> {
+    if (!this.db) await this.initialize();
+    const now = new Date().toISOString();
+    const expiresBefore = new Date(Date.now() - CAMPAIGN_CLAIM_LEASE_MS).toISOString();
+    await this.db!.runAsync(
+      `UPDATE outgoing_messages SET updated_at = ?
+       WHERE correlation_id = ? AND status IN ('CLAIMED', 'SENDING') AND updated_at > ?`,
+      [now, correlationId, expiresBefore],
+    );
+  }
+
+  async startClaimedOutgoingMessageAttempt(id: number, correlationId: string): Promise<boolean> {
+    if (!this.db) await this.initialize();
+    const now = new Date().toISOString();
+    const expiresBefore = new Date(Date.now() - CAMPAIGN_CLAIM_LEASE_MS).toISOString();
+    const result = await this.db!.runAsync(
+      `UPDATE outgoing_messages
+       SET status = 'SENDING', updated_at = ?, last_attempt_at = ?
+       WHERE id = ? AND correlation_id = ?
+         AND status IN ('CLAIMED', 'SENDING') AND updated_at > ?`,
+      [now, now, id, correlationId, expiresBefore],
+    );
+    return result.changes === 1;
   }
 
   async updateOutgoingStatus(
     id: number,
     status: OutgoingMessageStatus,
     updates?: { error?: string; correlationId?: string; incrementRetry?: boolean }
-  ): Promise<void> {
+  ): Promise<boolean> {
     if (!this.db) await this.initialize();
     const now = new Date().toISOString();
 
@@ -784,31 +1017,179 @@ class Database {
     query += ` WHERE id = ?`;
     params.push(id);
 
-    await this.db!.runAsync(query, params);
+    if (updates?.correlationId) {
+      query += ` AND status = 'SENDING' AND correlation_id = ?`;
+      params.push(updates.correlationId);
+    }
+
+    const result = await this.db!.runAsync(query, params);
+    return result.changes === 1;
+  }
+
+  async completeOutgoingMessage(
+    id: number,
+    status: 'SENT' | 'FAILED',
+    correlationId: string,
+    recipientId: string | null,
+    error?: string,
+  ): Promise<boolean> {
+    if (!this.db) await this.initialize();
+    const now = new Date().toISOString();
+
+    return this.withTransaction(async (transaction) => {
+      const result = await transaction.runAsync(
+        `UPDATE outgoing_messages
+         SET status = ?, last_error = ?, updated_at = ?, last_attempt_at = ?
+         WHERE id = ? AND status = 'SENDING' AND correlation_id = ?`,
+        [status, error ?? null, now, now, id, correlationId],
+      );
+      if (result.changes !== 1) return false;
+
+      if (recipientId) {
+        const recipientResult = await transaction.runAsync(
+          `UPDATE campaign_recipients
+           SET status = ?, sent_at = ?, error_message = ?
+           WHERE id = ?
+             AND campaign_id = (SELECT campaign_id FROM outgoing_messages WHERE id = ?)`,
+          [
+            status === 'SENT' ? 'sent' : 'failed',
+            status === 'SENT' ? now : null,
+            error ?? null,
+            recipientId,
+            id,
+          ],
+        );
+        if (recipientResult.changes !== 1) {
+          throw new Error(`تعذر تحديث حالة المستلم المرتبط برسالة الطابور ${id}.`);
+        }
+      }
+
+      return true;
+    });
   }
 
   async markOutgoingBlocked(campaignId: string, reason: string): Promise<void> {
     if (!this.db) await this.initialize();
     const now = new Date().toISOString();
 
-    await this.db!.runAsync(
-      `UPDATE outgoing_messages 
-       SET status = 'BLOCKED', last_error = ?, updated_at = ?
-       WHERE campaign_id = ? AND status IN ('PENDING', 'RETRY_WAITING', 'QUEUED')`,
-      [reason, now, campaignId]
-    );
+    await this.withTransaction(async (transaction) => {
+      const candidates = await transaction.getAllAsync<{
+        id: number;
+        payload_json: string | null;
+      }>(
+        `SELECT id, payload_json FROM outgoing_messages
+         WHERE campaign_id = ? AND status IN ('PENDING', 'RETRY_WAITING', 'QUEUED')`,
+        [campaignId],
+      );
+
+      for (const candidate of candidates) {
+        const result = await transaction.runAsync(
+        `UPDATE outgoing_messages
+         SET status = 'BLOCKED', last_error = ?, updated_at = ?
+         WHERE id = ? AND status IN ('PENDING', 'RETRY_WAITING', 'QUEUED')`,
+          [reason, now, candidate.id],
+        );
+        if (result.changes !== 1 || !candidate.payload_json) continue;
+
+        let payload: unknown;
+        try {
+          payload = JSON.parse(candidate.payload_json);
+        } catch (error) {
+          throw new Error(`تعذر قراءة بيانات المستلم المرتبطة برسالة الطابور ${candidate.id}.`, {
+            cause: error,
+          });
+        }
+        if (typeof payload !== 'object' || payload === null) continue;
+        const recipientId = (payload as Record<string, unknown>).recipientId;
+        if (typeof recipientId !== 'string') continue;
+
+        const recipientResult = await transaction.runAsync(
+          `UPDATE campaign_recipients
+           SET status = 'failed', error_message = ?
+           WHERE id = ? AND campaign_id = ? AND status = 'pending'`,
+          [reason, recipientId, campaignId],
+        );
+        if (recipientResult.changes !== 1) {
+          throw new Error(`تعذر تحديث المستلم المرتبط برسالة الطابور ${candidate.id}.`);
+        }
+      }
+    });
   }
 
-  async resetSendingToRetryWaiting(): Promise<void> {
+  private async recoverExpiredOutgoingClaims(): Promise<void> {
     if (!this.db) return;
     const now = new Date().toISOString();
+    const expiredBefore = new Date(Date.now() - CAMPAIGN_CLAIM_LEASE_MS).toISOString();
 
-    await this.db.runAsync(
-      `UPDATE outgoing_messages 
-       SET status = 'RETRY_WAITING', updated_at = ?
-       WHERE status = 'SENDING'`,
-      [now]
+    await this.withTransaction(async (transaction) => {
+      await transaction.runAsync(
+        `UPDATE outgoing_messages
+         SET status = ?, updated_at = ?
+         WHERE status = 'CLAIMED' AND updated_at <= ?`,
+        [getExpiredClaimRecoveryStatus('CLAIMED'), now, expiredBefore],
+      );
+
+      const expiredMessages = await transaction.getAllAsync<{
+        id: number;
+        payload_json: string | null;
+      }>(
+        `SELECT id, payload_json FROM outgoing_messages
+         WHERE status = 'SENDING' AND updated_at <= ?`,
+        [expiredBefore],
+      );
+
+      for (const message of expiredMessages) {
+        const result = await transaction.runAsync(
+          `UPDATE outgoing_messages
+           SET status = ?, last_error = ?, updated_at = ?
+           WHERE id = ? AND status = 'SENDING' AND updated_at <= ?`,
+          [
+            getExpiredClaimRecoveryStatus('SENDING'),
+            EXPIRED_CLAIM_ERROR,
+            now,
+            message.id,
+            expiredBefore,
+          ],
+        );
+        if (result.changes !== 1 || !message.payload_json) continue;
+
+        try {
+          const payload: unknown = JSON.parse(message.payload_json);
+          if (typeof payload !== 'object' || payload === null) continue;
+          const recipientId = (payload as Record<string, unknown>).recipientId;
+          if (typeof recipientId !== 'string') continue;
+          await transaction.runAsync(
+            `UPDATE campaign_recipients
+             SET status = 'failed', error_message = ?
+             WHERE id = ? AND status = 'pending'`,
+            [EXPIRED_CLAIM_ERROR, recipientId],
+          );
+        } catch (error) {
+          console.warn(`تعذر ربط الرسالة المنتهية بالمستلم ${message.id}:`, error);
+        }
+      }
+    });
+  }
+
+  private async recoverInterruptedCampaigns(): Promise<void> {
+    await this.recoverExpiredOutgoingClaims();
+    if (!this.db) return;
+
+    const interruptedCampaigns = await this.db.getAllAsync<{ id: string }>(
+      `SELECT id FROM campaigns WHERE status = 'sending'`,
     );
+
+    for (const campaign of interruptedCampaigns) {
+      const stats = await this.getCampaignQueueStats(campaign.id);
+      const status = resolveCampaignQueueStatus(stats);
+      if (status === 'sending') continue;
+      await this.updateCampaignStatus(
+        campaign.id,
+        status,
+        stats.sent,
+        stats.failed + stats.blocked,
+      );
+    }
   }
 
   async getCampaignQueueStats(campaignId: string): Promise<{
@@ -834,7 +1215,7 @@ class Database {
       stats.total += r.count;
       if (r.status === 'PENDING' || r.status === 'QUEUED' || r.status === 'RETRY_WAITING') {
         stats.pending += r.count;
-      } else if (r.status === 'SENDING') {
+      } else if (r.status === 'SENDING' || r.status === 'CLAIMED') {
         stats.sending += r.count;
       } else if (r.status === 'SENT') {
         stats.sent += r.count;

@@ -8,6 +8,26 @@
 
 import type { AppSettings } from './settingsStore';
 
+export const MAX_TIMER_DELAY_MS = 2_147_483_647;
+
+export async function sleepForDelay(
+  delayMs: number,
+  schedule: (callback: () => void, timeoutMs: number) => void = (callback, timeoutMs) => {
+    setTimeout(callback, timeoutMs);
+  },
+): Promise<void> {
+  if (!Number.isFinite(delayMs) || delayMs < 0) {
+    throw new RangeError('يجب أن يكون التأخير رقماً محدوداً وغير سالب.');
+  }
+
+  let remaining = Math.ceil(delayMs);
+  while (remaining > 0) {
+    const chunk = Math.min(remaining, MAX_TIMER_DELAY_MS);
+    await new Promise<void>((resolve) => schedule(resolve, chunk));
+    remaining -= chunk;
+  }
+}
+
 /**
  * تحليل ترويسة Retry-After (ثواني أو تاريخ)
  * @param header القيمة الواردة من ترويسة الاستجابة
@@ -15,15 +35,22 @@ import type { AppSettings } from './settingsStore';
  */
 export function parseRetryAfterMs(header?: string | null): number | null {
   if (!header) return null;
+  const value = header.trim();
+  if (!value) return null;
 
-  // فحص ما إذا كانت القيمة رقماً مباشراً (ثواني)
-  const seconds = parseInt(header, 10);
-  if (!isNaN(seconds) && seconds >= 0) {
-    return seconds * 1000;
+  if (/^\d+$/.test(value)) {
+    const seconds = Number(value);
+    const milliseconds = seconds * 1000;
+    return Number.isSafeInteger(milliseconds) ? milliseconds : null;
   }
 
-  // فحص ما إذا كانت تاريخاً بصيغة RFC 1123
-  const date = Date.parse(header);
+  if (
+    !/^(Mon|Tue|Wed|Thu|Fri|Sat|Sun), \d{2} (Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec) \d{4} \d{2}:\d{2}:\d{2} GMT$/i.test(value)
+  ) {
+    return null;
+  }
+
+  const date = Date.parse(value);
   if (!isNaN(date)) {
     const diff = date - Date.now();
     return diff > 0 ? diff : 0;
@@ -82,7 +109,9 @@ export function isRetryableError(error: unknown): boolean {
     if (
       msg.includes('network') ||
       msg.includes('timeout') ||
+      msg.includes('abort') ||
       msg.includes('connection refused') ||
+      msg.includes('failed to fetch') ||
       msg.includes('fetch failed')
     ) {
       return true;

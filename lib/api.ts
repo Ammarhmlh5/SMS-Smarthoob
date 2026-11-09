@@ -2,11 +2,13 @@
  * API Client for Python Backend
  * Connects phone app to Python backend instead of Edge Functions
  */
+import { DEFAULT_SETTINGS, loadSettings } from '@/lib/settingsStore';
 
 // Dynamic API URL based on environment
 // For Expo Go on device/emulator: use your machine's local IP
 // For web: localhost:8000
 let API_BASE_URL = 'http://10.0.2.2:8000'; // Android emulator - points to host machine
+let hasRuntimeApiBaseUrl = false;
 
 // Function to set API URL based on platform
 export function getApiBaseUrl(): string {
@@ -21,6 +23,20 @@ export function getApiBaseUrl(): string {
 // Allow overriding API URL from outside
 export function setApiBaseUrl(url: string) {
   API_BASE_URL = url.trim().replace(/\/+$/, '');
+  hasRuntimeApiBaseUrl = true;
+}
+
+async function getRequestBaseUrl(): Promise<string> {
+  if (hasRuntimeApiBaseUrl) return API_BASE_URL;
+  const settings = await loadSettings();
+  if (
+    typeof window !== 'undefined' &&
+    window.location.hostname === 'localhost' &&
+    settings.apiBaseUrl === DEFAULT_SETTINGS.apiBaseUrl
+  ) {
+    return 'http://localhost:8000';
+  }
+  return settings.apiBaseUrl.trim().replace(/\/+$/, '') || API_BASE_URL;
 }
 
 // =====================
@@ -47,6 +63,7 @@ export interface DocumentAnalysis {
     confidence: number;
   }[];
   rowCount: number;
+  records?: Record<string, string>[];
   sampleData?: Record<string, string>[];
   suggestedPhoneColumn?: string;
   suggestedNameColumn?: string;
@@ -97,7 +114,7 @@ async function fetchApi<T>(
   endpoint: string,
   options: RequestInit = {}
 ): Promise<T> {
-  const url = `${API_BASE_URL}${endpoint}`;
+  const url = `${await getRequestBaseUrl()}${endpoint}`;
   
   const response = await fetch(url, {
     ...options,
@@ -152,6 +169,10 @@ export type UploadableFile =
   | File
   | { uri: string; name: string; type?: string };
 
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === 'object' && value !== null;
+}
+
 export async function parseDocument(
   file: UploadableFile,
   userId: string
@@ -159,7 +180,7 @@ export async function parseDocument(
   const formData = new FormData();
   formData.append('file', file as any);
 
-  const response = await fetch(`${API_BASE_URL}/api/v1/documents/parse`, {
+  const response = await fetch(`${await getRequestBaseUrl()}/api/v1/documents/parse`, {
     method: 'POST',
     headers: {
       Authorization: `Bearer ${userId}`,
@@ -168,24 +189,62 @@ export async function parseDocument(
   });
 
   if (!response.ok) {
-    throw new Error('Failed to parse document');
+    const body = await response.text();
+    throw new Error(
+      body.slice(0, 300) || `تعذر تحليل المستند (HTTP ${response.status}).`,
+    );
   }
 
-  const result = await response.json();
+  const result: unknown = await response.json();
+  if (!isRecord(result) || !isRecord(result.data)) {
+    throw new Error('استجابة محلل المستندات غير صالحة.');
+  }
   const data = result.data;
-  
+  const columns = Array.isArray(data.columns)
+    ? data.columns.filter((column): column is string => typeof column === 'string')
+    : [];
+  const detectedFields = Array.isArray(data.detected_fields) ? data.detected_fields : [];
+  const detectedColumns = detectedFields.flatMap((field) => {
+    if (!isRecord(field) || typeof field.column_name !== 'string') return [];
+    return [{
+      name: field.column_name,
+      type: typeof field.detected_type === 'string' ? field.detected_type : 'unknown',
+      confidence: typeof field.confidence === 'number' ? field.confidence : 0,
+    }];
+  });
+  const records = Array.isArray(data.records) && data.records.every(isRecord)
+    ? data.records.map((record) =>
+        Object.fromEntries(
+          Object.entries(record).map(([key, value]) => [key, String(value ?? '')]),
+        ),
+      )
+    : undefined;
+  const sampleData = Array.isArray(data.sample_data) && data.sample_data.every(isRecord)
+    ? data.sample_data.map((record) =>
+        Object.fromEntries(
+          Object.entries(record).map(([key, value]) => [key, String(value ?? '')]),
+        ),
+      )
+    : undefined;
+  const rowCount = typeof data.row_count === 'number' && Number.isInteger(data.row_count)
+    ? data.row_count
+    : 0;
+
+  if (columns.length === 0 || rowCount < 1) {
+    throw new Error('لم يُرجع محلل المستندات صفوفاً وأعمدة قابلة للاستخدام.');
+  }
+
   // Transform backend response to frontend format
   return {
-    columns: data.columns || [],
-    detectedColumns: (data.detected_fields || []).map((f: any) => ({
-      name: f.column_name,
-      type: f.detected_type,
-      confidence: f.confidence,
-    })),
-    rowCount: data.row_count || 0,
-    sampleData: data.sample_data,
-    suggestedPhoneColumn: data.suggested_phone_column,
-    suggestedNameColumn: data.suggested_name_column,
+    columns,
+    detectedColumns,
+    rowCount,
+    records,
+    sampleData,
+    suggestedPhoneColumn:
+      typeof data.suggested_phone_column === 'string' ? data.suggested_phone_column : undefined,
+    suggestedNameColumn:
+      typeof data.suggested_name_column === 'string' ? data.suggested_name_column : undefined,
   };
 }
 
@@ -288,4 +347,3 @@ export async function getSettings(userId: string): Promise<{ batch_size: number;
   });
   return result.data || { batch_size: 50, max_retries: 3 };
 }
-

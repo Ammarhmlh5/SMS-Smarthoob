@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useMemo, useState } from 'react';
 import {
+  Alert,
   ActivityIndicator,
   Modal,
   Pressable,
@@ -37,11 +38,13 @@ import type { GatewaySettings } from '@/lib/gatewaySettings';
 import {
   fetchCampaigns,
   fetchSubscribers,
+  resumeCampaign,
   sendCampaign,
 } from '@/lib/campaigns';
 import type { Campaign, Subscriber } from '@/lib/campaigns';
 import { evaluateSendGate } from '@/lib/sendGuard';
 import type { DocumentAnalysis } from '@/lib/documentParser';
+import { buildDocumentRecipients } from '@/lib/documentRecipients';
 import { colors, fonts, spacing } from '@/constants/theme';
 
 type Step = 'form' | 'fetching' | 'preview' | 'sending' | 'result';
@@ -75,7 +78,11 @@ export default function CampaignsScreen() {
 
   const [selectedCampaignForDetail, setSelectedCampaignForDetail] = useState<Campaign | null>(null);
   const [showDetailModal, setShowDetailModal] = useState(false);
-  const [sendingProgress, setSendingProgress] = useState<{ sent: number; total: number }>({ sent: 0, total: 0 });
+  const [sendingProgress, setSendingProgress] = useState<{ sent: number; processed: number; total: number }>({
+    sent: 0,
+    processed: 0,
+    total: 0,
+  });
 
   const load = useCallback(async () => {
     setLoading(true);
@@ -124,7 +131,7 @@ export default function CampaignsScreen() {
   const placeholders = selectedTemplateObj ? extractPlaceholders(selectedTemplateObj.body) : [];
 
   const canStartGateway =
-    selectedConnection !== '' && selectedTemplate !== '' && campaignName.trim().length > 0;
+    selectedConnection !== '' && campaignName.trim().length > 0;
 
   const resetForm = () => {
     setStep('form');
@@ -143,11 +150,13 @@ export default function CampaignsScreen() {
       // Map subscribers with rendered message if template exists
       const enrichedSubs: Subscriber[] = subs.map((s) => ({
         ...s,
-        phone: s.email, // In SMS gateway, email field holds the phone/address
-        message: selectedTemplateObj
+        message: s.message || (selectedTemplateObj
           ? renderMessage(selectedTemplateObj.body, { الاسم: s.name, name: s.name })
-          : undefined,
+          : undefined),
       }));
+      if (enrichedSubs.some((subscriber) => !subscriber.message?.trim())) {
+        throw new Error('بعض المشتركين لا يملكون رسالة جاهزة؛ اختر قالباً أو أعد إعداد بيانات البوابة.');
+      }
       setSubscribers(enrichedSubs);
       setImportedFileName(null);
       setStep('preview');
@@ -158,76 +167,30 @@ export default function CampaignsScreen() {
   };
 
   const handleDocumentMapped = (mapping: Record<string, string>, doc?: DocumentAnalysis) => {
-    if (!doc || !selectedTemplateObj) {
+    if (!doc) {
       setShowImportModal(false);
       return;
     }
 
-    const records = doc.records || doc.columnInfo && Object.keys(doc.columnInfo).length > 0
-      ? (doc.records && doc.records.length > 0 ? doc.records : [])
-      : [];
-
-    // Identify phone column
-    const phoneCol =
-      doc.suggestedPhoneColumn ||
-      mapping['الجوال'] ||
-      mapping['الهاتف'] ||
-      mapping['phone'] ||
-      mapping['mobile'] ||
-      doc.columns.find((c) => /هاتف|جوال|phone|mobile|واتساب/i.test(c)) ||
-      doc.columns[0];
-
-    // Identify name column
-    const nameCol =
-      doc.suggestedNameColumn ||
-      mapping['الاسم'] ||
-      mapping['اسم'] ||
-      mapping['name'] ||
-      mapping['client'] ||
-      mapping['customer'] ||
-      doc.columns.find((c) => /اسم|name|عميل|مشترك/i.test(c));
-
-    let generatedSubs: Subscriber[] = [];
-
-    if (records.length > 0) {
-      generatedSubs = records.map((row, idx) => {
-        const phone = row[phoneCol] || '';
-        const name = nameCol && row[nameCol] ? row[nameCol] : `مشترك ${idx + 1}`;
-
-        // Map variables to values
-        const rowDataForTemplate: Record<string, string> = { ...row };
-        for (const [varName, colName] of Object.entries(mapping)) {
-          if (colName && row[colName] !== undefined) {
-            rowDataForTemplate[varName] = row[colName];
-          }
-        }
-
-        const message = renderMessage(selectedTemplateObj.body, rowDataForTemplate);
-        return {
-          phone,
-          name,
-          message,
-          data: rowDataForTemplate,
-        };
+    let generatedSubs: Subscriber[];
+    try {
+      generatedSubs = buildDocumentRecipients({
+        columns: doc.columns,
+        records: doc.records ?? [],
+        rowCount: doc.rowCount,
+        mapping,
+        suggestedPhoneColumn: doc.suggestedPhoneColumn,
+        suggestedNameColumn: doc.suggestedNameColumn,
+        templateBody: selectedTemplateObj?.body,
+        renderMessage,
       });
-    } else {
-      // If document row records were not directly returned (e.g. backend cloud summary),
-      // create sample recipient representation based on rowCount
-      const count = doc.rowCount || 5;
-      for (let i = 0; i < count; i++) {
-        const name = `عميل ${i + 1}`;
-        const phone = `96655000000${i + 1}`;
-        const mockData: Record<string, string> = { الاسم: name, name };
-        for (const [v, c] of Object.entries(mapping)) {
-          mockData[v] = `[${c}]`;
-        }
-        generatedSubs.push({
-          phone,
-          name,
-          message: renderMessage(selectedTemplateObj.body, mockData),
-          data: mockData,
-        });
-      }
+    } catch (error) {
+      setShowImportModal(false);
+      Alert.alert(
+        'تعذر تجهيز المستند',
+        error instanceof Error ? error.message : 'تعذر تجهيز رسائل المستند.',
+      );
+      return;
     }
 
     setSubscribers(generatedSubs);
@@ -257,30 +220,62 @@ export default function CampaignsScreen() {
     setStep('preview');
   };
 
-  const handleSend = async () => {
-    // 1. التحقق عبر Send Gate أولاً
-    const gate = await evaluateSendGate({
-      connectionId: selectedConnection,
-      recipientsCount: subscribers.length,
+  const handleResumeCampaign = async (campaign: Campaign) => {
+    setShowDetailModal(false);
+    setSendingProgress({
+      sent: campaign.sent_count,
+      processed: campaign.sent_count + campaign.failed_count,
+      total: campaign.total_recipients,
     });
-    if (!gate.canProceed) {
-      setSendError(gate.message);
-      return;
+    setStep('sending');
+    try {
+      const result = await resumeCampaign(campaign.id, (progress) => {
+        setSendingProgress({
+          sent: progress.sent,
+          processed: progress.processed,
+          total: progress.total,
+        });
+      });
+      setSendingProgress({ sent: result.sent, processed: result.total, total: result.total });
+      setSendResult({ sent: result.sent, failed: result.failed, total: result.total });
+      setStep('result');
+      await load();
+    } catch (err) {
+      setStep('form');
+      Alert.alert(
+        'تعذر استكمال الحملة',
+        err instanceof Error ? err.message : 'تعذر استكمال الحملة. حاول مرة أخرى.',
+      );
+      await load();
     }
+  };
 
-    setSendingProgress({ sent: 0, total: subscribers.length });
+  const handleSend = async () => {
+    setSendingProgress({ sent: 0, processed: 0, total: subscribers.length });
     setStep('sending');
     setSendError(null);
     try {
+      const gate = await evaluateSendGate({
+        connectionId: selectedConnection,
+        recipientsCount: subscribers.length,
+      });
+      if (!gate.canProceed) throw new Error(gate.message);
+
       const result = await sendCampaign({
         connection_id: selectedConnection,
-        template_id: selectedTemplate,
+        template_id: selectedTemplate || null,
         campaign_name: campaignName,
         batch_size: settings?.batch_size ?? 50,
         max_retries: settings?.max_retries ?? 3,
         recipients: subscribers,
+      }, (progress) => {
+        setSendingProgress({
+          sent: progress.sent,
+          processed: progress.processed,
+          total: progress.total,
+        });
       });
-      setSendingProgress({ sent: result.sent, total: result.total });
+      setSendingProgress({ sent: result.sent, processed: result.total, total: result.total });
       setSendResult({ sent: result.sent, failed: result.failed, total: result.total });
       setStep('result');
       load();
@@ -520,10 +515,6 @@ export default function CampaignsScreen() {
                       setSubscribersError('يرجى اختيار الخدمة المرتبطة');
                       return;
                     }
-                    if (!selectedTemplate) {
-                      setSubscribersError('يرجى اختيار القالب أولاً لربط المتغيرات به');
-                      return;
-                    }
                     setSubscribersError(null);
                     setShowImportModal(true);
                   }}
@@ -621,7 +612,7 @@ export default function CampaignsScreen() {
                         {sub.name}
                       </Text>
                       <Text style={styles.subscriberPhone} numberOfLines={1}>
-                        {sub.phone || sub.email}
+                        {sub.phone}
                       </Text>
                     </View>
                     {sub.message ? (
@@ -672,7 +663,7 @@ export default function CampaignsScreen() {
                       {
                         width: `${
                           sendingProgress.total > 0
-                            ? Math.min(100, Math.round((sendingProgress.sent / sendingProgress.total) * 100))
+                            ? Math.min(100, Math.round((sendingProgress.processed / sendingProgress.total) * 100))
                             : 10
                         }%`,
                       },
@@ -681,8 +672,8 @@ export default function CampaignsScreen() {
                 </View>
 
                 <Text style={styles.loadingSubText}>
-                  {sendingProgress.sent > 0
-                    ? `تم إرسال ${sendingProgress.sent} من ${sendingProgress.total} رسالة`
+                  {sendingProgress.processed > 0
+                    ? `تمت معالجة ${sendingProgress.processed} من ${sendingProgress.total} رسالة؛ أُرسل بنجاح ${sendingProgress.sent}`
                     : `يتم الإرسال على دفعات (${subscribers.length} رسالة)`}
                 </Text>
               </View>
@@ -844,6 +835,7 @@ export default function CampaignsScreen() {
           setSelectedCampaignForDetail(null);
         }}
         onRetryFailed={handleRetryFailed}
+        onResumeCampaign={handleResumeCampaign}
       />
 
       {/* Document Import Modal Overlay */}

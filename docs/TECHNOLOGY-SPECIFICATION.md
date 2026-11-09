@@ -16,7 +16,7 @@
 | **لغة البرمجة** | TypeScript 5.8 | فحص صارم للأنواع البرمجية (Strict Mode) ومنع أخطاء الـ Runtime تماماً. |
 | **التخزين المحلي** | Expo SQLite (v58.0) | محرك SQLite محلي متكامل، سريع، ويدعم وضع عدم الاتصال بالإنترنت والـ WASM على الويب. |
 | **السحابة وقواعد البيانات** | Supabase (PostgreSQL + RLS) | إدارة التوثيق (Auth)، عزل بيانات المستخدمين (Row Level Security)، والمزامنة السحابية. |
-| **المهام السحابية الخفية** | Supabase Edge Functions (Deno) | تشغيل مهام الإرسال `hoodhad-send` وإدارة البوابات دون كشف المفاتيح للعميل. |
+| **إعدادات البوابات والإرسال** | Supabase RLS + Fetch من التطبيق | قراءة إعدادات المستخدم عبر RLS، ثم الاتصال المباشر من التطبيق إلى بوابة الرسائل. |
 | **محرك الذكاء الاصطناعي** | Python FastAPI Backend | محرك ذكي متخصص في استخراج الجداول من PDF/Excel ومطابقة الحقول باللغة العربية. |
 | **المحلل المحلي** | TypeScript Heuristic Parser | محلل خفيف داخل التطبيق لقراءة ملفات CSV وتحليل الأعمدة أوفلاين دون الحاجة لأي خادم. |
 | **اختيار الملفات** | `expo-document-picker` | اختيار المستندات محلياً مع دعم صلاحيات التخزين على Android و iOS. |
@@ -45,7 +45,7 @@ graph TB
     subgraph Cloud["خدمات Supabase السحابية"]
         Auth["خدمة الهوية والمصادقة (Auth)"]
         CloudDB[(قاعدة بيانات PostgreSQL)]
-        EdgeSend["دالة إرسال الرسائل (hoodhad-send)"]
+        RLS["إعدادات المستخدم المعزولة عبر RLS"]
     end
 
     subgraph Gateways["بوابات إرسال الرسائل"]
@@ -60,8 +60,8 @@ graph TB
     DocService --> AIEngine
     LocalDB <--> SyncEngine
     SyncEngine <-->|مزامنة ثنائية| CloudDB
-    UI -->|بدء الحملة| EdgeSend
-    EdgeSend --> HodHod
+    UI --> RLS
+    UI -->|إرسال مباشر| HodHod
 ```
 
 ---
