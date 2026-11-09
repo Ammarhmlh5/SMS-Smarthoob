@@ -4,6 +4,7 @@ import {
   Alert,
   Modal,
   Pressable,
+  Platform,
   ScrollView,
   StyleSheet,
   Text,
@@ -45,6 +46,7 @@ export default function SettingsScreen() {
   // ─── حالة المستخدم ──────────────────────────────────────────────────────────
   const [userEmail, setUserEmail] = useState<string | null>(null);
   const [signingOut, setSigningOut] = useState(false);
+  const [signOutError, setSignOutError] = useState<string | null>(null);
 
   // ─── إعدادات البوابات ────────────────────────────────────────────────────────
   const [settings, setSettings] = useState<GatewaySettings | null>(null);
@@ -190,17 +192,35 @@ export default function SettingsScreen() {
 
   // ─── تسجيل الخروج ────────────────────────────────────────────────────────────
 
-  const handleSignOut = async () => {
+  const confirmSignOut = async () => {
+    setSigningOut(true);
+    setSignOutError(null);
+    try {
+      const { error } = await supabase.auth.signOut();
+      if (error) throw error;
+    } catch (error) {
+      setSignOutError(error instanceof Error ? error.message : 'تعذر تسجيل الخروج. حاول مرة أخرى.');
+    } finally {
+      setSigningOut(false);
+    }
+  };
+
+  const handleSignOut = () => {
+    if (signingOut) return;
+
+    if (Platform.OS === 'web') {
+      if (window.confirm('هل أنت متأكد من تسجيل الخروج؟')) {
+        void confirmSignOut();
+      }
+      return;
+    }
+
     Alert.alert('تسجيل الخروج', 'هل أنت متأكد من تسجيل الخروج؟', [
       { text: 'إلغاء', style: 'cancel' },
       {
         text: 'تسجيل الخروج',
         style: 'destructive',
-        onPress: async () => {
-          setSigningOut(true);
-          await supabase.auth.signOut();
-          setSigningOut(false);
-        },
+        onPress: () => { void confirmSignOut(); },
       },
     ]);
   };
@@ -283,6 +303,11 @@ export default function SettingsScreen() {
                   )}
                 </Pressable>
               </View>
+              {signOutError ? (
+                <Text accessibilityRole="alert" style={styles.signOutErrorText}>
+                  {signOutError}
+                </Text>
+              ) : null}
             </View>
 
             {/* ── 1. إدارة بوابات الإرسال ── */}
@@ -600,6 +625,13 @@ const styles = StyleSheet.create({
     fontFamily: fonts.semibold,
     fontSize: 13,
     color: colors.error[600],
+    writingDirection: 'rtl',
+  },
+  signOutErrorText: {
+    fontFamily: fonts.regular,
+    fontSize: 13,
+    color: colors.error[700],
+    textAlign: 'right',
     writingDirection: 'rtl',
   },
   // ─── رأس الأقسام ─────────────────────────────────────────────────────────────
