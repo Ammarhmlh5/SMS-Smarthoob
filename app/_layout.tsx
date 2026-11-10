@@ -1,4 +1,4 @@
-import { useEffect } from 'react';
+import { useEffect, useRef } from 'react';
 import { Stack, useRouter, useSegments } from 'expo-router';
 import { StatusBar } from 'expo-status-bar';
 import { useFonts } from 'expo-font';
@@ -12,11 +12,14 @@ import {
 import { useFrameworkReady } from '@/hooks/useFrameworkReady';
 import { AuthProvider, useAuth } from '@/lib/auth';
 import { colors, fonts } from '@/constants/theme';
+import { ShareIntentProvider, useShareIntentContext } from 'expo-share-intent';
 
 SplashScreen.preventAutoHideAsync();
 
 function RootNavigator() {
   const { session, loading } = useAuth();
+  const { hasShareIntent, shareIntent, resetShareIntent } = useShareIntentContext();
+  const handledShareIntent = useRef(false);
   const segments = useSegments();
   const router = useRouter();
 
@@ -30,6 +33,21 @@ function RootNavigator() {
       router.replace('/');
     }
   }, [session, loading, inAuthGroup, router]);
+
+  useEffect(() => {
+    if (!hasShareIntent) {
+      handledShareIntent.current = false;
+      return;
+    }
+    if (!shareIntent.files?.length) {
+      resetShareIntent();
+      return;
+    }
+    if (session && !handledShareIntent.current) {
+      handledShareIntent.current = true;
+      router.replace('/(tabs)/campaigns');
+    }
+  }, [hasShareIntent, shareIntent.files, resetShareIntent, session, router]);
 
   if (loading) {
     return (
@@ -68,10 +86,12 @@ export default function RootLayout() {
   }
 
   return (
-    <AuthProvider>
-      <RootNavigator />
-      <StatusBar style="dark" />
-    </AuthProvider>
+    <ShareIntentProvider options={{ resetOnBackground: false }}>
+      <AuthProvider>
+        <RootNavigator />
+        <StatusBar style="dark" />
+      </AuthProvider>
+    </ShareIntentProvider>
   );
 }
 

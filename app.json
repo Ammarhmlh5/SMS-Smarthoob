@@ -13,6 +13,7 @@
       "image": "./assets/images/icon.png"
     },
     "ios": {
+      "bundleIdentifier": "com.hudhud.invoices",
       "supportsTablet": true,
       "infoPlist": {
         "NSPhotoLibraryUsageDescription": "يرجى السماح بالوصول لمكتبة الصور لاستيراد ملفات البيانات",
@@ -45,6 +46,23 @@
       [
         "expo-document-picker",
         {}
+      ],
+      [
+        "expo-share-intent",
+        {
+          "scheme": "myapp",
+          "androidIntentFilters": [
+            "text/csv",
+            "application/csv",
+            "application/octet-stream",
+            "application/pdf",
+            "application/vnd.ms-excel",
+            "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+          ],
+          "iosActivationRules": {
+            "NSExtensionActivationSupportsFileWithMaxCount": 1
+          }
+        }
       ]
     ],
     "experiments": {

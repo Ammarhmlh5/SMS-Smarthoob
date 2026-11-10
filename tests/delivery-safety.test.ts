@@ -257,11 +257,29 @@ async function runTests() {
       readyDocumentRecipients.length === 2,
     'المستندات ذات الرسائل الجاهزة تُجهز محلياً دون قالب أو استدعاء خادم',
   );
+  const explicitlyMappedDocumentRecipients = buildDocumentRecipients({
+    columns: ['رقم التواصل', 'المحتوى', 'رقم الهاتف', 'نص الرسالة'],
+    records: [{
+      'رقم التواصل': '+966500000007',
+      'المحتوى': 'غير مستخدم',
+      'رقم الهاتف': '+966500000008',
+      'نص الرسالة': 'رسالة من العمود المختار',
+    }],
+    rowCount: 1,
+    mapping: {},
+    recipientMapping: { phoneColumn: 'رقم الهاتف', messageColumn: 'نص الرسالة' },
+  });
+  assert(
+    explicitlyMappedDocumentRecipients[0].phone === '+966500000008' &&
+      explicitlyMappedDocumentRecipients[0].message === 'رسالة من العمود المختار',
+    'استخدام عمودي الهاتف والرسالة اللذين اختارهما المستخدم',
+  );
   const renderedDocumentRecipients = buildDocumentRecipients({
     columns: ['phone', 'name'],
     records: [{ phone: '+966500000003', name: 'سارة' }],
     rowCount: 1,
     mapping: { الاسم: 'name' },
+    recipientMapping: { phoneColumn: 'phone' },
     templateBody: 'مرحباً {{الاسم}}',
     renderMessage: (body, data) => body.replace('{{الاسم}}', data.الاسم),
   });

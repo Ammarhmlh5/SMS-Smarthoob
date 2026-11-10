@@ -3,57 +3,48 @@
  * Allows user to import a document and map variables to columns
  */
 
-import { useState, useEffect } from 'react';
+import { useState, useEffect, useCallback } from 'react';
 import { ActivityIndicator, Pressable, ScrollView, StyleSheet, Text, View } from 'react-native';
-import { FileSpreadsheet, Upload, Check, X, ArrowRight, RefreshCw } from 'lucide-react-native';
+import { FileSpreadsheet, Upload, Check, X, ArrowRight, RefreshCw, Phone, MessageSquareText } from 'lucide-react-native';
 import { colors, fonts, spacing } from '@/constants/theme';
 import { 
   pickDocument, 
   parseDocumentFile,
   suggestMapping, 
-  type DocumentAnalysis, 
-  type VariableMapping 
+  type DocumentAnalysis,
 } from '@/lib/documentParser';
 import { parseDocument } from '@/lib/api';
 import { useAuth } from '@/lib/auth';
+import { isPreparedMessageColumn, type DocumentRecipientMapping } from '@/lib/documentRecipients';
 
 type Props = {
   variables: string[];
-  onMapped: (mapping: Record<string, string>, document?: DocumentAnalysis) => void;
+  sharedFile?: { uri: string; name: string } | null;
+  onMapped: (
+    mapping: Record<string, string>,
+    document?: DocumentAnalysis,
+    recipientMapping?: DocumentRecipientMapping,
+  ) => void;
   onCancel: () => void;
 };
 
-export function DocumentImportModal({ variables, onMapped, onCancel }: Props) {
+export function DocumentImportModal({ variables, sharedFile, onMapped, onCancel }: Props) {
   const { session } = useAuth();
   const [step, setStep] = useState<'pick' | 'mapping' | 'done'>('pick');
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [document, setDocument] = useState<DocumentAnalysis | null>(null);
-  const [mappings, setMappings] = useState<VariableMapping[]>([]);
   const [manualMappings, setManualMappings] = useState<Record<string, string>>({});
+  const [phoneColumn, setPhoneColumn] = useState('');
+  const [messageColumn, setMessageColumn] = useState('');
 
-  useEffect(() => {
-    if (document) {
-      const suggested = suggestMapping(variables, document.columns, document.columnInfo);
-      setMappings(suggested);
-      
-      const initial: Record<string, string> = {};
-      for (const m of suggested) {
-        initial[m.variable] = m.column;
-      }
-      setManualMappings(initial);
-    }
-  }, [document, variables]);
-
-  const handlePickDocument = async () => {
+  const processDocument = useCallback(async (result: { uri: string; name: string }) => {
     setLoading(true);
     setError(null);
-    
+
     try {
-      const result = await pickDocument();
-      if (!result) {
-        setLoading(false);
-        return;
+      if (!/\.(csv|xlsx?|pdf)$/i.test(result.name)) {
+        throw new Error('نوع الملف غير مدعوم. اختر ملف CSV أو Excel أو PDF.');
       }
 
       let transformedDoc: DocumentAnalysis | null = null;
@@ -121,12 +112,42 @@ export function DocumentImportModal({ variables, onMapped, onCancel }: Props) {
       }
 
       if (transformedDoc) {
+        const suggested = suggestMapping(variables, transformedDoc.columns, transformedDoc.columnInfo);
+        const initial: Record<string, string> = {};
+        for (const mapping of suggested) {
+          initial[mapping.variable] = mapping.column;
+        }
+        setManualMappings(initial);
+        setPhoneColumn(
+          transformedDoc.suggestedPhoneColumn ||
+          transformedDoc.columns.find((column) => transformedDoc.columnInfo[column]?.type === 'phone') ||
+          transformedDoc.columns.find((column) => /هاتف|جوال|phone|mobile|واتساب/i.test(column)) ||
+          '',
+        );
+        setMessageColumn(transformedDoc.columns.find(isPreparedMessageColumn) || '');
         setDocument(transformedDoc);
         setStep('mapping');
       }
     } catch (err) {
       setError(err instanceof Error ? err.message : 'تعذر تحليل الملف');
     } finally {
+      setLoading(false);
+    }
+  }, [session?.user?.id, variables]);
+
+  useEffect(() => {
+    if (sharedFile) void processDocument(sharedFile);
+  }, [processDocument, sharedFile]);
+
+  const handlePickDocument = async () => {
+    setLoading(true);
+    setError(null);
+    try {
+      const result = await pickDocument();
+      if (result) await processDocument(result);
+      else setLoading(false);
+    } catch (err) {
+      setError(err instanceof Error ? err.message : 'تعذر اختيار الملف');
       setLoading(false);
     }
   };
@@ -136,18 +157,77 @@ export function DocumentImportModal({ variables, onMapped, onCancel }: Props) {
       ...prev,
       [variable]: column
     }));
+    setError(null);
   };
 
   const handleConfirm = () => {
+    const hasPreparedMessage = document?.columns.some(isPreparedMessageColumn) ?? false;
+    if (!phoneColumn) {
+      setError('حدد عمود رقم الهاتف للمتابعة.');
+      return;
+    }
+    if (hasPreparedMessage && !messageColumn) {
+      setError('حدد عمود نص الرسالة الجاهزة للمتابعة.');
+      return;
+    }
+    if (!hasPreparedMessage && variables.some((variable) => !manualMappings[variable])) {
+      setError('اربط جميع متغيرات القالب بأعمدة المستند للمتابعة.');
+      return;
+    }
+
     const validMappings: Record<string, string> = {};
     for (const [variable, column] of Object.entries(manualMappings)) {
       if (column) {
         validMappings[variable] = column;
       }
     }
-    onMapped(validMappings, document || undefined);
+    onMapped(validMappings, document || undefined, {
+      phoneColumn,
+      messageColumn: hasPreparedMessage ? messageColumn : undefined,
+    });
     setStep('done');
   };
+
+  const renderColumnSelector = (
+    selectedColumn: string,
+    onSelect: (column: string) => void,
+    accessibilityLabel: string,
+  ) => (
+    <View style={styles.columnPicker}>
+      <ScrollView
+        horizontal
+        showsHorizontalScrollIndicator={false}
+        contentContainerStyle={styles.columnPickerContent}
+      >
+        {document?.columns.map((column) => (
+          <Pressable
+            key={column}
+            accessibilityRole="button"
+            accessibilityLabel={`${accessibilityLabel}: ${column}`}
+            accessibilityState={{ selected: selectedColumn === column }}
+            onPress={() => {
+              onSelect(column);
+              setError(null);
+            }}
+            style={({ pressed }) => [
+              styles.columnOption,
+              selectedColumn === column && styles.columnOptionSelected,
+              pressed && styles.pressed,
+            ]}
+          >
+            <Text
+              style={[
+                styles.columnOptionText,
+                selectedColumn === column && styles.columnOptionTextSelected,
+              ]}
+            >
+              {column}
+            </Text>
+          </Pressable>
+        ))}
+      </ScrollView>
+    </View>
+  );
 
   const renderPickStep = () => (
     <View style={styles.stepContent}>
@@ -191,10 +271,7 @@ export function DocumentImportModal({ variables, onMapped, onCancel }: Props) {
     if (!document) return null;
 
     const sampleRecords = document.records?.slice(0, 2) ?? [];
-    const hasPreparedMessage = document.columns.some((column) =>
-      /^(message|sms|message_body|sms_body|ready_message|prepared_message|رسالة جاهزة|رسالة_جاهزة|الرسالة الجاهزة|الرسالة_الجاهزة|نص الرسالة|نص_الرسالة|نص الرسالة الجاهزة|نص_الرسالة_الجاهزة|الرسالة)$/i.test(column.trim()),
-    );
-    const hasNoVariableMappings = Object.values(manualMappings).every((column) => !column);
+    const hasPreparedMessage = document.columns.some(isPreparedMessageColumn);
 
     return (
       <ScrollView style={styles.mappingScroll} showsVerticalScrollIndicator={false}>
@@ -209,71 +286,93 @@ export function DocumentImportModal({ variables, onMapped, onCancel }: Props) {
             </View>
           </View>
 
-          <View style={styles.variablesSection}>
-            <Text style={styles.sectionTitle}>ربط المتغيرات بالأعمدة</Text>
-            <Text style={styles.sectionHint}>
-              حدد العمود المناسب لكل متغير من ملف البيانات
-            </Text>
-
-            {variables.map((variable) => (
-              <View key={variable} style={styles.mappingRow}>
-                <View style={styles.variableInfo}>
-                  <Text style={styles.variableName}>{`{{${variable}}}`}</Text>
-                  <Text style={styles.variableHint}>
-                    {document.columnInfo[manualMappings[variable]]?.type === 'unknown' 
-                      ? 'لم يتم الربط'
-                      : document.columnInfo[manualMappings[variable]]?.type}
-                  </Text>
-                </View>
-                
-                <View style={styles.arrowContainer}>
-                  <ArrowRight size={16} color={colors.neutral[400]} strokeWidth={2} />
-                </View>
-
-                <View style={styles.columnPicker}>
-                  <ScrollView 
-                    horizontal 
-                    showsHorizontalScrollIndicator={false}
-                    contentContainerStyle={styles.columnPickerContent}
-                  >
-                    <Pressable
-                      onPress={() => handleMappingChange(variable, '')}
-                      style={({ pressed }) => [
-                        styles.columnOption,
-                        !manualMappings[variable] && styles.columnOptionSelected,
-                        pressed && styles.pressed
-                      ]}
-                    >
-                      <Text style={[
-                        styles.columnOptionText,
-                        !manualMappings[variable] && styles.columnOptionTextSelected
-                      ]}>
-                        -
-                      </Text>
-                    </Pressable>
-                    
-                    {document.columns.map((col) => (
-                      <Pressable
-                        key={col}
-                        onPress={() => handleMappingChange(variable, col)}
-                        style={({ pressed }) => [
-                          styles.columnOption,
-                          manualMappings[variable] === col && styles.columnOptionSelected,
-                          pressed && styles.pressed
-                        ]}
-                      >
-                        <Text style={[
-                          styles.columnOptionText,
-                          manualMappings[variable] === col && styles.columnOptionTextSelected
-                        ]}>
-                          {col}
-                        </Text>
-                      </Pressable>
-                    ))}
-                  </ScrollView>
-                </View>
+          <View style={styles.requiredMappings}>
+            <View style={styles.requiredMapping}>
+              <View style={styles.requiredMappingHeading}>
+                <Phone size={16} color={colors.primary[700]} strokeWidth={2} />
+                <Text style={styles.sectionTitle}>عمود رقم الهاتف</Text>
               </View>
-            ))}
+              <Text style={styles.sectionHint}>اختر العمود الذي يحتوي على أرقام المستلمين</Text>
+              {renderColumnSelector(phoneColumn, setPhoneColumn, 'رقم الهاتف')}
+            </View>
+
+            {hasPreparedMessage ? (
+              <View style={styles.requiredMapping}>
+                <View style={styles.requiredMappingHeading}>
+                  <MessageSquareText size={16} color={colors.primary[700]} strokeWidth={2} />
+                  <Text style={styles.sectionTitle}>عمود نص الرسالة الجاهزة</Text>
+                </View>
+                <Text style={styles.sectionHint}>سيتم استخدام نص الرسالة من كل صف في الملف</Text>
+                {renderColumnSelector(messageColumn, setMessageColumn, 'نص الرسالة')}
+              </View>
+            ) : variables.length > 0 ? (
+              <View style={styles.variablesSection}>
+                <Text style={styles.sectionTitle}>أعمدة متغيرات القالب</Text>
+                <Text style={styles.sectionHint}>
+                  لا يحتوي المستند على رسائل جاهزة؛ ستُنشأ الرسائل من القالب المختار
+                </Text>
+
+                {variables.map((variable) => (
+                  <View key={variable} style={styles.mappingRow}>
+                    <View style={styles.variableInfo}>
+                      <Text style={styles.variableName}>{`{{${variable}}}`}</Text>
+                      <Text style={styles.variableHint}>
+                        {document.columnInfo[manualMappings[variable]]?.type === 'unknown'
+                          ? 'لم يتم الربط'
+                          : document.columnInfo[manualMappings[variable]]?.type}
+                      </Text>
+                    </View>
+
+                    <View style={styles.arrowContainer}>
+                      <ArrowRight size={16} color={colors.neutral[400]} strokeWidth={2} />
+                    </View>
+
+                    <View style={styles.columnPicker}>
+                      <ScrollView
+                        horizontal
+                        showsHorizontalScrollIndicator={false}
+                        contentContainerStyle={styles.columnPickerContent}
+                      >
+                        <Pressable
+                          onPress={() => handleMappingChange(variable, '')}
+                          style={({ pressed }) => [
+                            styles.columnOption,
+                            !manualMappings[variable] && styles.columnOptionSelected,
+                            pressed && styles.pressed,
+                          ]}
+                        >
+                          <Text style={[
+                            styles.columnOptionText,
+                            !manualMappings[variable] && styles.columnOptionTextSelected,
+                          ]}>
+                            -
+                          </Text>
+                        </Pressable>
+
+                        {document.columns.map((column) => (
+                          <Pressable
+                            key={column}
+                            onPress={() => handleMappingChange(variable, column)}
+                            style={({ pressed }) => [
+                              styles.columnOption,
+                              manualMappings[variable] === column && styles.columnOptionSelected,
+                              pressed && styles.pressed,
+                            ]}
+                          >
+                            <Text style={[
+                              styles.columnOptionText,
+                              manualMappings[variable] === column && styles.columnOptionTextSelected,
+                            ]}>
+                              {column}
+                            </Text>
+                          </Pressable>
+                        ))}
+                      </ScrollView>
+                    </View>
+                  </View>
+                ))}
+              </View>
+            ) : null}
           </View>
 
           <View style={styles.previewSection}>
@@ -317,18 +416,9 @@ export function DocumentImportModal({ variables, onMapped, onCancel }: Props) {
 
             <Pressable
               onPress={handleConfirm}
-              disabled={
-                variables.length > 0 &&
-                hasNoVariableMappings &&
-                !hasPreparedMessage
-              }
               style={({ pressed }) => [
                 styles.primaryButton,
                 pressed && styles.pressed,
-                variables.length > 0 &&
-                  hasNoVariableMappings &&
-                  !hasPreparedMessage &&
-                  styles.disabled
               ]}
             >
               <Check size={18} color={colors.neutral[0]} strokeWidth={2} />
@@ -517,6 +607,19 @@ const styles = StyleSheet.create({
   variablesSection: {
     width: '100%',
     gap: spacing.sm,
+  },
+  requiredMappings: {
+    width: '100%',
+    gap: spacing.md,
+  },
+  requiredMapping: {
+    width: '100%',
+    gap: spacing.xs,
+  },
+  requiredMappingHeading: {
+    flexDirection: 'row-reverse',
+    alignItems: 'center',
+    gap: spacing.xs,
   },
   sectionTitle: {
     fontFamily: fonts.bold,

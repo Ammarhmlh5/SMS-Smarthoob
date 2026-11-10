@@ -5,11 +5,17 @@ export type DocumentCampaignRecipient = {
   data: Record<string, string>;
 };
 
+export type DocumentRecipientMapping = {
+  phoneColumn: string;
+  messageColumn?: string;
+};
+
 type BuildDocumentRecipientsOptions = {
   columns: string[];
   records: Record<string, string>[];
   rowCount: number;
   mapping: Record<string, string>;
+  recipientMapping?: DocumentRecipientMapping;
   suggestedPhoneColumn?: string;
   suggestedNameColumn?: string;
   templateBody?: string;
@@ -19,11 +25,16 @@ type BuildDocumentRecipientsOptions = {
 const MESSAGE_COLUMN_PATTERN =
   /^(message|sms|message_body|sms_body|ready_message|prepared_message|رسالة جاهزة|رسالة_جاهزة|الرسالة الجاهزة|الرسالة_الجاهزة|نص الرسالة|نص_الرسالة|نص الرسالة الجاهزة|نص_الرسالة_الجاهزة|الرسالة)$/i;
 
+export function isPreparedMessageColumn(column: string): boolean {
+  return MESSAGE_COLUMN_PATTERN.test(column.trim());
+}
+
 export function buildDocumentRecipients({
   columns,
   records,
   rowCount,
   mapping,
+  recipientMapping,
   suggestedPhoneColumn,
   suggestedNameColumn,
   templateBody,
@@ -33,7 +44,7 @@ export function buildDocumentRecipients({
     throw new Error('بيانات المستند غير مكتملة؛ لا يمكن إرسال عينة جزئية.');
   }
 
-  const phoneColumn =
+  const phoneColumn = recipientMapping?.phoneColumn ||
     suggestedPhoneColumn ||
     mapping['الجوال'] ||
     mapping['الهاتف'] ||
@@ -41,6 +52,9 @@ export function buildDocumentRecipients({
     mapping['mobile'] ||
     columns.find((column) => /هاتف|جوال|phone|mobile|واتساب/i.test(column)) ||
     columns[0];
+  if (!phoneColumn || !columns.includes(phoneColumn)) {
+    throw new Error('حدد عمود رقم الهاتف في المستند.');
+  }
   const nameColumn =
     suggestedNameColumn ||
     mapping['الاسم'] ||
@@ -49,7 +63,11 @@ export function buildDocumentRecipients({
     mapping['client'] ||
     mapping['customer'] ||
     columns.find((column) => /اسم|name|عميل|مشترك/i.test(column));
-  const messageColumn = columns.find((column) => MESSAGE_COLUMN_PATTERN.test(column.trim()));
+  const messageColumn = recipientMapping?.messageColumn ||
+    columns.find(isPreparedMessageColumn);
+  if (messageColumn && !columns.includes(messageColumn)) {
+    throw new Error('حدد عمود الرسالة الموجود في المستند.');
+  }
 
   if (!messageColumn && (!templateBody || !renderMessage)) {
     throw new Error('اختر قالباً أو استخدم مستنداً يحتوي على عمود جاهز للرسالة.');
@@ -75,9 +93,12 @@ export function buildDocumentRecipients({
     const readyMessage = messageColumn ? data[messageColumn]?.trim() : '';
     const message = readyMessage ||
       (templateBody && renderMessage ? renderMessage(templateBody, data) : '');
+    if (!message?.trim()) {
+      throw new Error(`نص الرسالة فارغ في صف المستند رقم ${index + 1}.`);
+    }
 
     return {
-      phone: phoneColumn ? data[phoneColumn]?.trim() ?? '' : '',
+      phone: data[phoneColumn]?.trim() ?? '',
       name: nameColumn && data[nameColumn]?.trim()
         ? data[nameColumn].trim()
         : `مشترك ${index + 1}`,

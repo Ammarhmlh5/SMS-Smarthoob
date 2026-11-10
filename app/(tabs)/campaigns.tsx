@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useState } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import {
   Alert,
   ActivityIndicator,
@@ -15,14 +15,11 @@ import {
   AlertCircle,
   CheckCircle2,
   FileSpreadsheet,
-  FileText,
   Layers,
   Loader2,
   Megaphone,
-  RotateCw,
   Search,
   Send,
-  Upload,
   Users,
   XCircle,
 } from 'lucide-react-native';
@@ -45,13 +42,17 @@ import type { Campaign, Subscriber } from '@/lib/campaigns';
 import { evaluateSendGate } from '@/lib/sendGuard';
 import type { DocumentAnalysis } from '@/lib/documentParser';
 import { buildDocumentRecipients } from '@/lib/documentRecipients';
+import type { DocumentRecipientMapping } from '@/lib/documentRecipients';
 import { colors, fonts, spacing } from '@/constants/theme';
+import { useShareIntentContext } from 'expo-share-intent';
 
 type Step = 'form' | 'fetching' | 'preview' | 'sending' | 'result';
 type SubscriberSource = 'file' | 'gateway';
 
 export default function CampaignsScreen() {
   const insets = useSafeAreaInsets();
+  const { hasShareIntent, shareIntent, resetShareIntent } = useShareIntentContext();
+  const handledShareIntent = useRef(false);
 
   const [campaigns, setCampaigns] = useState<Campaign[]>([]);
   const [settings, setSettings] = useState<GatewaySettings | null>(null);
@@ -67,6 +68,7 @@ export default function CampaignsScreen() {
   const [subscribers, setSubscribers] = useState<Subscriber[]>([]);
   const [importedFileName, setImportedFileName] = useState<string | null>(null);
   const [showImportModal, setShowImportModal] = useState(false);
+  const [sharedFile, setSharedFile] = useState<{ uri: string; name: string } | null>(null);
   const [subscribersError, setSubscribersError] = useState<string | null>(null);
   const [sendResult, setSendResult] = useState<{ sent: number; failed: number; total: number } | null>(null);
   const [sendError, setSendError] = useState<string | null>(null);
@@ -102,7 +104,8 @@ export default function CampaignsScreen() {
         setSelectedConnection(settingsData.connections[0].id);
       }
       if (templateData.length > 0 && !selectedTemplate) {
-        setSelectedTemplate(templateData[0].id);
+        const defaultTemplate = templateData.find((template) => template.is_default);
+        setSelectedTemplate((defaultTemplate ?? templateData[0]).id);
       }
     } catch (err) {
       setLoadError(err instanceof Error ? err.message : 'تعذر تحميل الحملات.');
@@ -114,6 +117,23 @@ export default function CampaignsScreen() {
   useEffect(() => {
     load();
   }, [load]);
+
+  useEffect(() => {
+    if (!hasShareIntent) {
+      handledShareIntent.current = false;
+      return;
+    }
+    const file = shareIntent.files?.[0];
+    if (!file || handledShareIntent.current) return;
+    handledShareIntent.current = true;
+    setSharedFile({ uri: file.path, name: file.fileName });
+    setSubscriberSource('file');
+    setCampaignName((current) =>
+      current.trim() || `إرسال مباشر - ${file.fileName.replace(/\.[^.]+$/, '')}`,
+    );
+    setShowImportModal(true);
+    resetShareIntent();
+  }, [hasShareIntent, shareIntent.files, resetShareIntent]);
 
     // تصفية وبحث الحملات
   const filteredCampaigns = useMemo(() => {
@@ -128,7 +148,10 @@ export default function CampaignsScreen() {
   const hasConnections = settings !== null && settings.connections.length > 0;
   const hasTemplates = templates.length > 0;
   const selectedTemplateObj = templates.find((t) => t.id === selectedTemplate);
-  const placeholders = selectedTemplateObj ? extractPlaceholders(selectedTemplateObj.body) : [];
+  const placeholders = useMemo(
+    () => selectedTemplateObj ? extractPlaceholders(selectedTemplateObj.body) : [],
+    [selectedTemplateObj],
+  );
 
   const canStartGateway =
     selectedConnection !== '' && campaignName.trim().length > 0;
@@ -166,9 +189,14 @@ export default function CampaignsScreen() {
     }
   };
 
-  const handleDocumentMapped = (mapping: Record<string, string>, doc?: DocumentAnalysis) => {
+  const handleDocumentMapped = (
+    mapping: Record<string, string>,
+    doc?: DocumentAnalysis,
+    recipientMapping?: DocumentRecipientMapping,
+  ) => {
     if (!doc) {
       setShowImportModal(false);
+      setSharedFile(null);
       return;
     }
 
@@ -179,6 +207,7 @@ export default function CampaignsScreen() {
         records: doc.records ?? [],
         rowCount: doc.rowCount,
         mapping,
+        recipientMapping,
         suggestedPhoneColumn: doc.suggestedPhoneColumn,
         suggestedNameColumn: doc.suggestedNameColumn,
         templateBody: selectedTemplateObj?.body,
@@ -186,6 +215,7 @@ export default function CampaignsScreen() {
       });
     } catch (error) {
       setShowImportModal(false);
+      setSharedFile(null);
       Alert.alert(
         'تعذر تجهيز المستند',
         error instanceof Error ? error.message : 'تعذر تجهيز رسائل المستند.',
@@ -195,7 +225,11 @@ export default function CampaignsScreen() {
 
     setSubscribers(generatedSubs);
     setImportedFileName(doc.fileName || 'ملف الفواتير');
+    setCampaignName((current) =>
+      current.trim() || `إرسال مباشر - ${(doc.fileName || 'ملف المستند').replace(/\.[^.]+$/, '')}`,
+    );
     setShowImportModal(false);
+    setSharedFile(null);
     setStep('preview');
   };
 
@@ -505,12 +539,8 @@ export default function CampaignsScreen() {
               {subscriberSource === 'file' ? (
                 <Pressable
                   accessibilityRole="button"
-                  accessibilityLabel="استيراد ملف المشتركين"
+                  accessibilityLabel="أرسل مباشرة من مستند"
                   onPress={() => {
-                    if (!campaignName.trim()) {
-                      setSubscribersError('يرجى إدخال اسم الحملة أولاً');
-                      return;
-                    }
                     if (!selectedConnection) {
                       setSubscribersError('يرجى اختيار الخدمة المرتبطة');
                       return;
@@ -524,12 +554,8 @@ export default function CampaignsScreen() {
                     pressed && styles.pressed,
                   ]}
                 >
-                  <Upload size={18} color={colors.neutral[0]} strokeWidth={2} />
-                  <Text style={styles.actionText}>
-                    {placeholders.length > 0
-                      ? `استيراد ملف ومطابقة ${placeholders.length} متغيرات`
-                      : 'استيراد ملف الفواتير والمشتركين'}
-                  </Text>
+                  <Send size={18} color={colors.neutral[0]} strokeWidth={2} />
+                  <Text style={styles.actionText}>أرسل مباشرة</Text>
                 </Pressable>
               ) : (
                 <Pressable
@@ -843,13 +869,22 @@ export default function CampaignsScreen() {
         visible={showImportModal}
         animationType="slide"
         transparent
-        onRequestClose={() => setShowImportModal(false)}
+        onRequestClose={() => {
+          setShowImportModal(false);
+          setSharedFile(null);
+        }}
       >
-        <DocumentImportModal
-          variables={placeholders}
-          onMapped={handleDocumentMapped}
-          onCancel={() => setShowImportModal(false)}
-        />
+        {showImportModal ? (
+          <DocumentImportModal
+            variables={placeholders}
+            sharedFile={sharedFile}
+            onMapped={handleDocumentMapped}
+            onCancel={() => {
+              setShowImportModal(false);
+              setSharedFile(null);
+            }}
+          />
+        ) : null}
       </Modal>
     </ScrollView>
   );
