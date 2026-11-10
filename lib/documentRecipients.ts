@@ -91,8 +91,9 @@ export function buildDocumentRecipients({
     }
 
     const readyMessage = messageColumn ? data[messageColumn]?.trim() : '';
-    const message = readyMessage ||
-      (templateBody && renderMessage ? renderMessage(templateBody, data) : '');
+    const message = messageColumn
+      ? readyMessage
+      : (templateBody && renderMessage ? renderMessage(templateBody, data) : '');
     if (!message?.trim()) {
       throw new Error(`نص الرسالة فارغ في صف المستند رقم ${index + 1}.`);
     }

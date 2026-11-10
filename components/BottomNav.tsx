@@ -2,6 +2,7 @@ import type { ComponentProps } from 'react';
 import { Pressable, StyleSheet, Text, View } from 'react-native';
 import type { Tabs } from 'expo-router';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
+import { useRouter } from 'expo-router';
 import { Home, Megaphone, FileText, Settings, Send } from 'lucide-react-native';
 import type { LucideIcon } from 'lucide-react-native';
 import { colors, fonts } from '@/constants/theme';
@@ -21,6 +22,7 @@ const SETTINGS_TAB: TabItem = { routeName: 'settings', label: 'الإعدادا�
 
 export function BottomNav({ state, navigation }: BottomTabBarProps) {
   const insets = useSafeAreaInsets();
+  const router = useRouter();
   const activeRouteName = state.routes[state.index]?.name;
 
   const navigateTo = (routeName: string) => {
@@ -64,7 +66,7 @@ export function BottomNav({ state, navigation }: BottomTabBarProps) {
           <Pressable
             accessibilityRole="button"
             accessibilityLabel="زر الإرسال الرئيسي"
-            onPress={() => navigateTo(CAMPAIGNS_TAB.routeName)}
+            onPress={() => router.push('/direct-send')}
             style={({ pressed }) => [styles.fab, pressed && styles.fabPressed]}
           >
             <Send size={26} color={colors.neutral[0]} strokeWidth={2} />

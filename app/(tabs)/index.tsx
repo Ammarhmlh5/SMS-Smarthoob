@@ -8,6 +8,7 @@ import {
   View,
 } from 'react-native';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
+import { useRouter } from 'expo-router';
 import {
   AlertTriangle,
   CheckCircle2,
@@ -35,6 +36,7 @@ interface DashboardStats {
 
 export default function MainMenuScreen() {
   const insets = useSafeAreaInsets();
+  const router = useRouter();
 
   const [stats, setStats] = useState<DashboardStats>({
     totalCampaigns: 0,
@@ -146,6 +148,24 @@ export default function MainMenuScreen() {
         )}
       </View>
 
+      <Pressable
+        accessibilityRole="button"
+        accessibilityLabel="فتح الإرسال المباشر"
+        onPress={() => router.push('/direct-send')}
+        style={({ pressed }) => [styles.directSendCard, pressed && styles.pressed]}
+      >
+        <View style={styles.directSendIcon}>
+          <Send size={23} color={colors.neutral[0]} strokeWidth={2} />
+        </View>
+        <View style={styles.directSendCopy}>
+          <Text style={styles.directSendTitle}>أرسل مباشرة</Text>
+          <Text style={styles.directSendDescription}>
+            جهّز الرسائل من مستند وأرسلها دون إنشاء حملة
+          </Text>
+        </View>
+        <FileText size={20} color={colors.primary[100]} />
+      </Pressable>
+
       {loadError ? (
         <View style={styles.loadErrorCard}>
           <AlertTriangle size={20} color={colors.error[600]} />
@@ -176,7 +196,7 @@ export default function MainMenuScreen() {
           </View>
           <Text style={styles.onboardingTitle}>مرحباً بك في هدهد الفواتير 👋</Text>
           <Text style={styles.onboardingDesc}>
-            ابدأ بإنشاء قالب رسالة، ثم أنشئ حملتك الأولى لإرسال الفواتير لعملائك.
+            أرسل من مستند مباشرة، أو أنشئ قالباً وحملة لإدارة الإرسال ومتابعته.
           </Text>
         </View>
       )}
@@ -298,6 +318,36 @@ const styles = StyleSheet.create({
     gap: spacing.md,
   },
   pressed: { opacity: 0.8 },
+  directSendCard: {
+    flexDirection: 'row-reverse',
+    alignItems: 'center',
+    gap: spacing.sm,
+    backgroundColor: colors.primary[700],
+    borderRadius: 18,
+    padding: spacing.md,
+  },
+  directSendIcon: {
+    width: 44,
+    height: 44,
+    borderRadius: 14,
+    backgroundColor: colors.primary[600],
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+  directSendCopy: { flex: 1, gap: 3 },
+  directSendTitle: {
+    fontFamily: fonts.bold,
+    fontSize: 16,
+    color: colors.neutral[0],
+    textAlign: 'right',
+  },
+  directSendDescription: {
+    fontFamily: fonts.regular,
+    fontSize: 12,
+    lineHeight: 18,
+    color: colors.primary[50],
+    textAlign: 'right',
+  },
   loadErrorCard: {
     alignItems: 'center',
     gap: spacing.sm,

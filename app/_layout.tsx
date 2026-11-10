@@ -45,7 +45,7 @@ function RootNavigator() {
     }
     if (session && !handledShareIntent.current) {
       handledShareIntent.current = true;
-      router.replace('/(tabs)/campaigns');
+      router.replace('/direct-send');
     }
   }, [hasShareIntent, shareIntent.files, resetShareIntent, session, router]);
 
@@ -60,6 +60,7 @@ function RootNavigator() {
   return (
     <Stack screenOptions={{ headerShown: false, contentStyle: { backgroundColor: colors.neutral[50] } }}>
       <Stack.Screen name="(tabs)" />
+      <Stack.Screen name="direct-send" />
       <Stack.Screen name="login" />
       <Stack.Screen name="+not-found" />
     </Stack>
