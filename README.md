@@ -42,6 +42,13 @@
 
 لتفعيل تسجيل الدخول والمزامنة السحابية، أضف متغيري البيئة `EXPO_PUBLIC_SUPABASE_URL` و`EXPO_PUBLIC_SUPABASE_ANON_KEY` في إعدادات بيئة التشغيل (مثل Secrets في Bolt). لا تستخدم مفتاح `service_role` في تطبيق العميل. عند غياب الإعدادات تبقى المعاينة قابلة للفتح، لكن المصادقة والمزامنة السحابية تكونان معطلتين.
 
+لتطبيق ترحيل قاعدة الخدمة الافتراضية من بيئة Bolt، أضف الأسرار الآتية من مشروعك:
+
+- `SUPABASE_PROJECT_REF`
+- `SUPABASE_ACCESS_TOKEN`
+
+ثم نفّذ `npm run db:migrate:default-gateway`. لا تضف رمز الوصول إلى ملفات المشروع أو Git.
+
 ```bash
 # تثبيت الحزم
 npm install
