@@ -43,7 +43,6 @@ export default function DirectSendScreen() {
   const handledShareIntent = useRef(false);
   const [gatewaySettings, setGatewaySettings] = useState<GatewaySettings | null>(null);
   const [templates, setTemplates] = useState<MessageTemplate[]>([]);
-  const [selectedConnection, setSelectedConnection] = useState('');
   const [selectedTemplate, setSelectedTemplate] = useState('');
   const [recipients, setRecipients] = useState<DirectSendRecipient[]>([]);
   const [sourceName, setSourceName] = useState('');
@@ -66,11 +65,6 @@ export default function DirectSendScreen() {
       ]);
       setGatewaySettings(settings);
       setTemplates(templateList);
-      setSelectedConnection((current) =>
-        settings.connections.some((connection) => connection.id === current)
-          ? current
-          : settings.connections[0]?.id ?? '',
-      );
       setSelectedTemplate((current) => {
         if (templateList.some((template) => template.id === current)) return current;
         return (templateList.find((template) => template.is_default) ?? templateList[0])?.id ?? '';
@@ -104,10 +98,6 @@ export default function DirectSendScreen() {
     () => selectedTemplateObject ? extractPlaceholders(selectedTemplateObject.body) : [],
     [selectedTemplateObject],
   );
-  const selectedConnectionObject = gatewaySettings?.connections.find(
-    (connection) => connection.id === selectedConnection,
-  );
-
   const handleDocumentMapped = useCallback((
     mapping: Record<string, string>,
     document?: DocumentAnalysis,
@@ -148,8 +138,9 @@ export default function DirectSendScreen() {
   }, [selectedTemplateObject]);
 
   const handleSend = async () => {
-    if (!selectedConnection) {
-      setError('اختر بوابة الإرسال أولاً.');
+    const defaultConnectionId = gatewaySettings?.default_connection_id;
+    if (!defaultConnectionId) {
+      setError('اضبط خدمة الإرسال الافتراضية من الإعدادات أولاً.');
       return;
     }
     setSending(true);
@@ -157,7 +148,7 @@ export default function DirectSendScreen() {
     setProgress({ sent: 0, failed: 0, processed: 0, total: recipients.length });
     setStep('sending');
     try {
-      const result = await sendDirectMessages(selectedConnection, recipients, setProgress);
+      const result = await sendDirectMessages(defaultConnectionId, recipients, setProgress);
       setSendResult(result);
       setStep('result');
     } catch (sendError) {
@@ -219,43 +210,14 @@ export default function DirectSendScreen() {
           </View>
         ) : null}
 
-        {gatewaySettings?.connections.length ? (
-          <Field label="بوابة الإرسال" Icon={Send}>
-            <View style={styles.optionList}>
-              {gatewaySettings.connections.map((connection) => {
-                const selected = selectedConnection === connection.id;
-                return (
-                  <Pressable
-                    key={connection.id}
-                    accessibilityRole="button"
-                    accessibilityState={{ selected, disabled: sending }}
-                    onPress={() => setSelectedConnection(connection.id)}
-                    disabled={sending}
-                    style={({ pressed }) => [
-                      styles.option,
-                      selected && styles.optionSelected,
-                      pressed && styles.pressed,
-                      sending && styles.disabled,
-                    ]}
-                  >
-                    <View style={[styles.radio, selected && styles.radioSelected]} />
-                    <View style={styles.optionCopy}>
-                      <Text style={styles.optionTitle}>{connection.sender_name}</Text>
-                      <Text style={styles.optionSub} numberOfLines={1}>{connection.endpoint_url}</Text>
-                    </View>
-                  </Pressable>
-                );
-              })}
-            </View>
-          </Field>
-        ) : (
+        {!gatewaySettings?.default_connection_id ? (
           <View style={styles.noticeBox}>
-            <Text style={styles.errorText}>لا توجد بوابة إرسال. أضف بوابة من الإعدادات للبدء.</Text>
+            <Text style={styles.errorText}>لا توجد خدمة إرسال افتراضية. اضبطها من الإعدادات للبدء.</Text>
             <Pressable onPress={() => router.push('/(tabs)/settings')} style={styles.settingsLink}>
               <Text style={styles.settingsLinkText}>فتح الإعدادات</Text>
             </Pressable>
           </View>
-        )}
+        ) : null}
 
         {templates.length ? (
           <Field label="القالب الافتراضي للرسائل غير الجاهزة" Icon={Layers}>
@@ -302,11 +264,11 @@ export default function DirectSendScreen() {
               setError(null);
               setShowImportModal(true);
             }}
-            disabled={!selectedConnection}
+            disabled={!gatewaySettings?.default_connection_id}
             style={({ pressed }) => [
               styles.primaryButton,
               pressed && styles.pressed,
-              !selectedConnection && styles.disabled,
+              !gatewaySettings?.default_connection_id && styles.disabled,
             ]}
           >
             <FileSpreadsheet size={19} color={colors.neutral[0]} />
@@ -322,7 +284,7 @@ export default function DirectSendScreen() {
             </View>
             {sourceName ? <Text style={styles.sourceName}>المستند: {sourceName}</Text> : null}
             <Text style={styles.mutedText}>
-              {recipients.length} رسالة عبر {selectedConnectionObject?.sender_name ?? 'البوابة المحددة'}
+              {recipients.length} رسالة جاهزة للإرسال
             </Text>
             <View style={styles.previewList}>
               {recipients.slice(0, 4).map((recipient, index) => (
@@ -341,11 +303,11 @@ export default function DirectSendScreen() {
             <Pressable
               accessibilityRole="button"
               onPress={handleSend}
-              disabled={sending || !selectedConnection}
+              disabled={sending || !gatewaySettings?.default_connection_id}
               style={({ pressed }) => [
                 styles.primaryButton,
                 pressed && styles.pressed,
-                (sending || !selectedConnection) && styles.disabled,
+                (sending || !gatewaySettings?.default_connection_id) && styles.disabled,
               ]}
             >
               <Send size={18} color={colors.neutral[0]} />

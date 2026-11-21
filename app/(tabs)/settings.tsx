@@ -29,7 +29,7 @@ import {
 import { ConnectionCard } from '@/components/ConnectionCard';
 import { ConnectionForm } from '@/components/ConnectionForm';
 import { SendingPreferencesForm } from '@/components/SendingPreferencesForm';
-import { fetchGatewaySettings } from '@/lib/gatewaySettings';
+import { fetchGatewaySettings, saveDefaultGatewayConnection } from '@/lib/gatewaySettings';
 import type { GatewayConnection, GatewaySettings } from '@/lib/gatewaySettings';
 import { database } from '@/lib/database';
 import { checkHealth, setApiBaseUrl } from '@/lib/api';
@@ -51,8 +51,12 @@ export default function SettingsScreen() {
   // ─── إعدادات البوابات ────────────────────────────────────────────────────────
   const [settings, setSettings] = useState<GatewaySettings | null>(null);
   const [loading, setLoading] = useState(true);
+  const [gatewayLoading, setGatewayLoading] = useState(true);
   const [loadError, setLoadError] = useState<string | null>(null);
+  const [gatewayLoadError, setGatewayLoadError] = useState<string | null>(null);
   const [form, setForm] = useState<FormState>({ mode: 'closed' });
+  const [savingDefaultConnectionId, setSavingDefaultConnectionId] = useState<string | null>(null);
+  const [defaultConnectionError, setDefaultConnectionError] = useState<string | null>(null);
 
   // ─── إعدادات التطبيق المحلية ─────────────────────────────────────────────────
   const [appSettings, setAppSettings] = useState<AppSettings>(DEFAULT_SETTINGS);
@@ -81,26 +85,57 @@ export default function SettingsScreen() {
 
   const load = useCallback(async () => {
     setLoading(true);
+    setGatewayLoading(true);
     setLoadError(null);
-    try {
-      // تحميل إعدادات البوابات من السحابة
-      const [gatewayData, localSettings, { data: { user } }] = await Promise.all([
-        fetchGatewaySettings(),
-        loadSettings(),
-        supabase.auth.getUser(),
-      ]);
+    setGatewayLoadError(null);
+    const gatewayTask = fetchGatewaySettings()
+      .then((gatewayData) => {
+        setSettings(gatewayData);
+      })
+      .catch((error: unknown) => {
+        setSettings(null);
+        setGatewayLoadError(
+          error instanceof Error ? error.message : 'تعذر تحميل إعدادات خدمة الإرسال.',
+        );
+      })
+      .finally(() => setGatewayLoading(false));
 
-      setSettings(gatewayData);
-      setAppSettings(localSettings);
-      setApiUrl(localSettings.apiBaseUrl);
-      setApiBaseUrl(localSettings.apiBaseUrl);
-      setUserEmail(user?.email ?? null);
-      await refreshSyncCount();
-    } catch (err) {
-      setLoadError(err instanceof Error ? err.message : 'تعذر تحميل الإعدادات.');
-    } finally {
-      setLoading(false);
+    const [localSettingsResult, userResult] = await Promise.allSettled([
+      loadSettings(),
+      supabase.auth.getUser(),
+    ]);
+
+    if (localSettingsResult.status === 'fulfilled') {
+      setAppSettings(localSettingsResult.value);
+      setApiUrl(localSettingsResult.value.apiBaseUrl);
+      setApiBaseUrl(localSettingsResult.value.apiBaseUrl);
+    } else {
+      setLoadError(
+        localSettingsResult.reason instanceof Error
+          ? localSettingsResult.reason.message
+          : 'تعذر تحميل الإعدادات المحلية.',
+      );
     }
+
+    if (userResult.status === 'fulfilled') {
+      const { data: { user }, error } = userResult.value;
+      if (error) {
+        setLoadError((current) => current ?? error.message);
+      } else {
+        setUserEmail(user?.email ?? null);
+      }
+    } else {
+      setLoadError((current) =>
+        current ??
+        (userResult.reason instanceof Error
+          ? userResult.reason.message
+          : 'تعذر تحميل بيانات الحساب.'),
+      );
+    }
+
+    await refreshSyncCount();
+    setLoading(false);
+    await gatewayTask;
   }, [refreshSyncCount]);
 
   useEffect(() => {
@@ -114,22 +149,44 @@ export default function SettingsScreen() {
   const isFormOpen = form.mode !== 'closed';
 
   const handleConnectionSaved = (saved: GatewayConnection) => {
+    if (!settings) {
+      setForm({ mode: 'closed' });
+      void load();
+      return;
+    }
+
     setSettings((current) => {
       if (!current) return current;
       const exists = current.connections.some((c) => c.id === saved.id);
       const connections = exists
         ? current.connections.map((c) => (c.id === saved.id ? saved : c))
         : [...current.connections, saved];
-      return { ...current, connections };
+      return {
+        ...current,
+        connections,
+        default_connection_id: current.default_connection_id ?? saved.id,
+      };
     });
     setForm({ mode: 'closed' });
   };
 
-  const handleConnectionDeleted = (id: string) => {
-    setSettings((current) =>
-      current ? { ...current, connections: current.connections.filter((c) => c.id !== id) } : current,
-    );
+  const handleConnectionDeleted = async (id: string) => {
+    await load();
     setForm((current) => (current.mode === 'edit' && current.connection.id === id ? { mode: 'closed' } : current));
+  };
+
+  const handleSetDefaultConnection = async (id: string) => {
+    setSavingDefaultConnectionId(id);
+    setDefaultConnectionError(null);
+    try {
+      setSettings(await saveDefaultGatewayConnection(id));
+    } catch (error) {
+      setDefaultConnectionError(
+        error instanceof Error ? error.message : 'تعذر حفظ خدمة الإرسال الافتراضية.',
+      );
+    } finally {
+      setSavingDefaultConnectionId(null);
+    }
   };
 
   // ─── معالجات المزامنة ────────────────────────────────────────────────────────
@@ -253,23 +310,25 @@ export default function SettingsScreen() {
               <Text style={styles.loadingText}>جارٍ تحميل الإعدادات…</Text>
             </View>
           </View>
-        ) : loadError || !settings ? (
-          <View style={styles.card}>
-            <View style={styles.errorBox}>
-              <Text style={styles.errorText}>{loadError ?? 'تعذر تحميل الإعدادات.'}</Text>
-              <Pressable
-                accessibilityRole="button"
-                accessibilityLabel="إعادة المحاولة"
-                onPress={load}
-                style={({ pressed }) => [styles.retryButton, pressed && styles.pressed]}
-              >
-                <RotateCw size={16} color={colors.primary[700]} strokeWidth={2} />
-                <Text style={styles.retryText}>إعادة المحاولة</Text>
-              </Pressable>
-            </View>
-          </View>
         ) : (
           <>
+            {loadError ? (
+              <View style={styles.card}>
+                <View style={styles.errorBox}>
+                  <Text style={styles.errorText}>{loadError}</Text>
+                  <Pressable
+                    accessibilityRole="button"
+                    accessibilityLabel="إعادة المحاولة"
+                    onPress={load}
+                    style={({ pressed }) => [styles.retryButton, pressed && styles.pressed]}
+                  >
+                    <RotateCw size={16} color={colors.primary[700]} strokeWidth={2} />
+                    <Text style={styles.retryText}>إعادة المحاولة</Text>
+                  </Pressable>
+                </View>
+              </View>
+            ) : null}
+
             {/* ── 0. بطاقة الحساب ── */}
             <View style={styles.card}>
               <View style={styles.accountCardRow}>
@@ -334,19 +393,61 @@ export default function SettingsScreen() {
                   <CircleDashed size={18} color={colors.warning[600]} strokeWidth={2} />
                 )}
                 <Text style={styles.statusText}>
-                  {hasConnections
-                    ? `${settings.connections.length} ${settings.connections.length === 1 ? 'خدمة مرتبطة' : 'خدمات مرتبطة'}`
-                    : 'لا توجد خدمات مرتبطة بعد'}
+                  {gatewayLoading
+                    ? 'جارٍ تحميل خدمات الإرسال…'
+                    : settings
+                    ? hasConnections
+                      ? `${settings.connections.length} ${settings.connections.length === 1 ? 'خدمة مرتبطة' : 'خدمات مرتبطة'}`
+                      : 'لا توجد خدمات مرتبطة بعد'
+                    : 'تعذر تحميل خدمات الإرسال'}
                 </Text>
               </View>
 
-              {settings.connections.map((connection) => (
+              {gatewayLoading ? (
+                <View style={styles.centered}>
+                  <ActivityIndicator color={colors.primary[700]} />
+                </View>
+              ) : null}
+
+              {gatewayLoadError ? (
+                <View style={styles.errorBox}>
+                  <Text accessibilityRole="alert" style={styles.errorText}>{gatewayLoadError}</Text>
+                  <Pressable
+                    accessibilityRole="button"
+                    accessibilityLabel="إعادة تحميل خدمات الإرسال"
+                    onPress={load}
+                    style={({ pressed }) => [styles.retryButton, pressed && styles.pressed]}
+                  >
+                    <RotateCw size={16} color={colors.primary[700]} strokeWidth={2} />
+                    <Text style={styles.retryText}>إعادة المحاولة</Text>
+                  </Pressable>
+                </View>
+              ) : null}
+
+              {settings && !settings.default_connection_ready ? (
+                <View style={[styles.statusRow, styles.statusPending]}>
+                  <CircleDashed size={18} color={colors.warning[600]} strokeWidth={2} />
+                  <Text style={styles.statusText}>
+                    طبّق ترحيل 20261110145500_add_default_gateway_connection.sql لتثبيت الخدمة الافتراضية أو تغييرها.
+                  </Text>
+                </View>
+              ) : null}
+
+              {defaultConnectionError ? (
+                <Text accessibilityRole="alert" style={styles.errorText}>{defaultConnectionError}</Text>
+              ) : null}
+
+              {settings?.connections.map((connection) => (
                 <ConnectionCard
                   key={connection.id}
                   connection={connection}
-                  disabled={false}
+                  disabled={savingDefaultConnectionId !== null}
+                  isDefault={settings.default_connection_id === connection.id}
+                  defaultConnectionReady={settings.default_connection_ready}
+                  settingDefault={savingDefaultConnectionId === connection.id}
                   onEdit={() => setForm({ mode: 'edit', connection })}
                   onDeleted={handleConnectionDeleted}
+                  onSetDefault={() => void handleSetDefaultConnection(connection.id)}
                 />
               ))}
 
@@ -364,12 +465,18 @@ export default function SettingsScreen() {
             {/* ── 2. إعدادات الإرسال والدفعات ── */}
             <View style={styles.card}>
               <Text style={styles.sectionTitle}>إعدادات الإرسال والدفعات</Text>
-              <SendingPreferencesForm
-                initial={settings}
-                appSettings={appSettings}
-                onSaved={setSettings}
-                onAppSettingsSaved={setAppSettings}
-              />
+              {settings ? (
+                <SendingPreferencesForm
+                  initial={settings}
+                  appSettings={appSettings}
+                  onSaved={setSettings}
+                  onAppSettingsSaved={setAppSettings}
+                />
+              ) : (
+                <Text style={styles.cardDescription}>
+                  إعدادات الدفعات غير متاحة حتى يتم تحميل إعدادات خدمة الإرسال.
+                </Text>
+              )}
             </View>
 
             {/* ── 3. المزامنة وقاعدة البيانات المحلية ── */}

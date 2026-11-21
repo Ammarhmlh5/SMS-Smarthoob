@@ -61,7 +61,6 @@ export default function CampaignsScreen() {
 
   const [step, setStep] = useState<Step>('form');
   const [subscriberSource, setSubscriberSource] = useState<SubscriberSource>('file');
-  const [selectedConnection, setSelectedConnection] = useState<string>('');
   const [selectedTemplate, setSelectedTemplate] = useState<string>('');
   const [campaignName, setCampaignName] = useState('');
   const [subscribers, setSubscribers] = useState<Subscriber[]>([]);
@@ -97,10 +96,6 @@ export default function CampaignsScreen() {
       setSettings(settingsData);
       setTemplates(templateData);
 
-      // Pre-select first connection & template if available
-      if (settingsData && settingsData.connections.length > 0 && !selectedConnection) {
-        setSelectedConnection(settingsData.connections[0].id);
-      }
       if (templateData.length > 0 && !selectedTemplate) {
         setSelectedTemplate(templateData[0].id);
       }
@@ -109,7 +104,7 @@ export default function CampaignsScreen() {
     } finally {
       setLoading(false);
     }
-  }, [selectedConnection, selectedTemplate]);
+  }, [selectedTemplate]);
 
   useEffect(() => {
     load();
@@ -126,12 +121,13 @@ export default function CampaignsScreen() {
   }, [campaigns, searchQuery, statusFilter]);
 
   const hasConnections = settings !== null && settings.connections.length > 0;
+  const defaultConnectionId = settings?.default_connection_id ?? '';
   const hasTemplates = templates.length > 0;
   const selectedTemplateObj = templates.find((t) => t.id === selectedTemplate);
   const placeholders = selectedTemplateObj ? extractPlaceholders(selectedTemplateObj.body) : [];
 
   const canStartGateway =
-    selectedConnection !== '' && campaignName.trim().length > 0;
+    defaultConnectionId !== '' && campaignName.trim().length > 0;
 
   const resetForm = () => {
     setStep('form');
@@ -146,7 +142,8 @@ export default function CampaignsScreen() {
     setStep('fetching');
     setSubscribersError(null);
     try {
-      const subs = await fetchSubscribers(selectedConnection);
+      if (!defaultConnectionId) throw new Error('اضبط خدمة الإرسال الافتراضية من الإعدادات أولاً.');
+      const subs = await fetchSubscribers(defaultConnectionId);
       // Map subscribers with rendered message if template exists
       const enrichedSubs: Subscriber[] = subs.map((s) => ({
         ...s,
@@ -211,9 +208,6 @@ export default function CampaignsScreen() {
 
     setSubscribers(retrySubs);
     setCampaignName(`إعادة إرسال: ${selectedCampaignForDetail.name}`);
-    if (selectedCampaignForDetail.connection_id) {
-      setSelectedConnection(selectedCampaignForDetail.connection_id);
-    }
     if (selectedCampaignForDetail.template_id) {
       setSelectedTemplate(selectedCampaignForDetail.template_id);
     }
@@ -256,13 +250,13 @@ export default function CampaignsScreen() {
     setSendError(null);
     try {
       const gate = await evaluateSendGate({
-        connectionId: selectedConnection,
+        connectionId: defaultConnectionId,
         recipientsCount: subscribers.length,
       });
       if (!gate.canProceed) throw new Error(gate.message);
 
       const result = await sendCampaign({
-        connection_id: selectedConnection,
+        connection_id: defaultConnectionId,
         template_id: selectedTemplate || null,
         campaign_name: campaignName,
         batch_size: settings?.batch_size ?? 50,
@@ -387,36 +381,6 @@ export default function CampaignsScreen() {
                 />
               </Field>
 
-              <Field label="الخدمة المرتبطة (البوابة)" Icon={Send}>
-                <View style={styles.selectWrap}>
-                  {settings?.connections.map((conn) => {
-                    const selected = selectedConnection === conn.id;
-                    return (
-                      <Pressable
-                        key={conn.id}
-                        accessibilityRole="button"
-                        onPress={() => setSelectedConnection(conn.id)}
-                        style={({ pressed }) => [
-                          styles.selectItem,
-                          selected && styles.selectItemActive,
-                          pressed && styles.pressed,
-                        ]}
-                      >
-                        <View style={styles.selectDot}>
-                          {selected ? <View style={styles.selectDotInner} /> : null}
-                        </View>
-                        <View style={styles.selectTextWrap}>
-                          <Text style={styles.selectTitle}>{conn.sender_name}</Text>
-                          <Text style={styles.selectSub} numberOfLines={1}>
-                            {conn.endpoint_url}
-                          </Text>
-                        </View>
-                      </Pressable>
-                    );
-                  })}
-                </View>
-              </Field>
-
               <Field label="القالب المعتمد" Icon={Layers}>
                 <View style={styles.selectWrap}>
                   {templates.map((tmpl) => {
@@ -511,8 +475,8 @@ export default function CampaignsScreen() {
                       setSubscribersError('يرجى إدخال اسم الحملة أولاً');
                       return;
                     }
-                    if (!selectedConnection) {
-                      setSubscribersError('يرجى اختيار الخدمة المرتبطة');
+                    if (!defaultConnectionId) {
+                      setSubscribersError('اضبط خدمة الإرسال الافتراضية من الإعدادات أولاً.');
                       return;
                     }
                     setSubscribersError(null);

@@ -1,6 +1,6 @@
 import { useState } from 'react';
 import { ActivityIndicator, Pressable, StyleSheet, Text, View } from 'react-native';
-import { Pencil, Trash2, Wifi, WifiOff } from 'lucide-react-native';
+import { CheckCircle2, Pencil, Trash2, Wifi, WifiOff } from 'lucide-react-native';
 import { formStyles } from '@/components/FormField';
 import { deleteGatewayConnection, testGatewayConnection } from '@/lib/gatewaySettings';
 import type { ConnectionTestResult, GatewayConnection } from '@/lib/gatewaySettings';
@@ -10,8 +10,12 @@ import { colors, fonts, spacing } from '@/constants/theme';
 type ConnectionCardProps = {
   connection: GatewayConnection;
   disabled: boolean;
+  isDefault: boolean;
+  defaultConnectionReady: boolean;
+  settingDefault: boolean;
   onEdit: () => void;
-  onDeleted: (id: string) => void;
+  onDeleted: (id: string) => void | Promise<void>;
+  onSetDefault: () => void;
 };
 
 type TestState =
@@ -28,7 +32,16 @@ function hostOf(endpoint: string): string {
   }
 }
 
-export function ConnectionCard({ connection, disabled, onEdit, onDeleted }: ConnectionCardProps) {
+export function ConnectionCard({
+  connection,
+  disabled,
+  isDefault,
+  defaultConnectionReady,
+  settingDefault,
+  onEdit,
+  onDeleted,
+  onSetDefault,
+}: ConnectionCardProps) {
   const [test, setTest] = useState<TestState>({ status: 'idle' });
   const [confirmingDelete, setConfirmingDelete] = useState(false);
   const [deleting, setDeleting] = useState(false);
@@ -99,6 +112,33 @@ export function ConnectionCard({ connection, disabled, onEdit, onDeleted }: Conn
           </Pressable>
         </View>
       </View>
+
+      {isDefault ? (
+        <View style={styles.defaultBadge}>
+          <CheckCircle2 size={15} color={colors.success[600]} strokeWidth={2} />
+          <Text style={styles.defaultText}>
+            {defaultConnectionReady ? 'خدمة الإرسال الافتراضية' : 'الخدمة الافتراضية الحالية مؤقتًا'}
+          </Text>
+        </View>
+      ) : defaultConnectionReady ? (
+        <Pressable
+          accessibilityRole="button"
+          accessibilityLabel="تعيين الخدمة كافتراضية"
+          onPress={onSetDefault}
+          disabled={disabled || settingDefault}
+          style={({ pressed }) => [
+            styles.defaultButton,
+            pressed && formStyles.pressed,
+            (disabled || settingDefault) && formStyles.disabled,
+          ]}
+        >
+          {settingDefault ? (
+            <ActivityIndicator size="small" color={colors.primary[700]} />
+          ) : (
+            <Text style={styles.defaultButtonText}>تعيين كخدمة افتراضية</Text>
+          )}
+        </Pressable>
+      ) : null}
 
       {test.status === 'done' &&
       test.result.reachable &&
@@ -206,6 +246,29 @@ const styles = StyleSheet.create({
   actions: {
     flexDirection: 'row',
     gap: spacing.xs / 2,
+  },
+  defaultBadge: {
+    flexDirection: 'row-reverse',
+    alignItems: 'center',
+    alignSelf: 'flex-start',
+    gap: spacing.xs / 2,
+    paddingVertical: spacing.xs / 2,
+  },
+  defaultText: {
+    fontFamily: fonts.semibold,
+    fontSize: 13,
+    color: colors.success[700],
+  },
+  defaultButton: {
+    minHeight: 36,
+    alignItems: 'flex-start',
+    justifyContent: 'center',
+    paddingHorizontal: spacing.xs,
+  },
+  defaultButtonText: {
+    fontFamily: fonts.semibold,
+    fontSize: 13,
+    color: colors.primary[700],
   },
   iconButton: {
     width: 40,

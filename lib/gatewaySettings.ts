@@ -12,6 +12,8 @@ export type GatewayConnection = {
 
 export type GatewaySettings = {
   connections: GatewayConnection[];
+  default_connection_id: string | null;
+  default_connection_ready: boolean;
   batch_size: number;
   max_retries: number;
   updated_at: string;
@@ -30,14 +32,24 @@ export type ConnectionTestResult = {
 };
 
 type PreferenceRow = {
+  default_connection_id: string | null;
+  default_connection_ready: boolean;
   batch_size: number;
   max_retries: number;
   updated_at: string;
 };
 
 const CONNECTION_COLUMNS = 'id, endpoint_url, sender_name, api_key, created_at, updated_at';
-const PREFERENCE_COLUMNS = 'batch_size, max_retries, updated_at';
+const PREFERENCE_COLUMNS = 'default_connection_id, batch_size, max_retries, updated_at';
+const LEGACY_PREFERENCE_COLUMNS = 'batch_size, max_retries, updated_at';
 const MAX_SENDER_LENGTH = 11;
+
+function isMissingDefaultConnectionColumn(error: { code?: string; message?: string }): boolean {
+  return (
+    (error.code === '42703' || error.code === 'PGRST204') &&
+    error.message?.includes('default_connection_id') === true
+  );
+}
 
 async function fetchWithTimeout(url: string, init: RequestInit, timeoutMs: number): Promise<Response> {
   const controller = new AbortController();
@@ -75,14 +87,44 @@ async function requireUserId(): Promise<string> {
   return data.user.id;
 }
 
+async function ensureLegacyPreferences(userId: string): Promise<PreferenceRow> {
+  const { data, error } = await supabase
+    .from('gateway_settings')
+    .select(LEGACY_PREFERENCE_COLUMNS)
+    .eq('user_id', userId)
+    .maybeSingle();
+  if (error) throw error;
+  if (data) return { ...data, default_connection_id: null, default_connection_ready: false };
+
+  const { data: created, error: insertError } = await supabase
+    .from('gateway_settings')
+    .insert({ batch_size: 50, max_retries: 3 })
+    .select(LEGACY_PREFERENCE_COLUMNS)
+    .single();
+  if (insertError) {
+    if (insertError.code !== '23505') throw insertError;
+    const { data: existing, error: readError } = await supabase
+      .from('gateway_settings')
+      .select(LEGACY_PREFERENCE_COLUMNS)
+      .eq('user_id', userId)
+      .single();
+    if (readError) throw readError;
+    return { ...existing, default_connection_id: null, default_connection_ready: false };
+  }
+  return { ...created, default_connection_id: null, default_connection_ready: false };
+}
+
 async function ensurePreferences(userId: string): Promise<PreferenceRow> {
   const { data, error } = await supabase
     .from('gateway_settings')
     .select(PREFERENCE_COLUMNS)
     .eq('user_id', userId)
     .maybeSingle();
-  if (error) throw error;
-  if (data) return data as PreferenceRow;
+  if (error) {
+    if (isMissingDefaultConnectionColumn(error)) return ensureLegacyPreferences(userId);
+    throw error;
+  }
+  if (data) return { ...data, default_connection_ready: true } as PreferenceRow;
 
   const { data: created, error: insertError } = await supabase
     .from('gateway_settings')
@@ -90,16 +132,20 @@ async function ensurePreferences(userId: string): Promise<PreferenceRow> {
     .select(PREFERENCE_COLUMNS)
     .single();
   if (insertError) {
+    if (isMissingDefaultConnectionColumn(insertError)) return ensureLegacyPreferences(userId);
     if (insertError.code !== '23505') throw insertError;
     const { data: existing, error: readError } = await supabase
       .from('gateway_settings')
       .select(PREFERENCE_COLUMNS)
       .eq('user_id', userId)
       .single();
-    if (readError) throw readError;
-    return existing as PreferenceRow;
+    if (readError) {
+      if (isMissingDefaultConnectionColumn(readError)) return ensureLegacyPreferences(userId);
+      throw readError;
+    }
+    return { ...existing, default_connection_ready: true } as PreferenceRow;
   }
-  return created as PreferenceRow;
+  return { ...created, default_connection_ready: true } as PreferenceRow;
 }
 
 export async function fetchGatewaySettings(): Promise<GatewaySettings> {
@@ -114,8 +160,27 @@ export async function fetchGatewaySettings(): Promise<GatewaySettings> {
   ]);
   if (connectionsResult.error) throw connectionsResult.error;
 
+  const connections = connectionsResult.data ?? [];
+  const defaultConnectionId = preferences.default_connection_ready
+    ? connections.some((connection) => connection.id === preferences.default_connection_id)
+      ? preferences.default_connection_id
+      : connections[0]?.id ?? null
+    : connections[0]?.id ?? null;
+  if (
+    preferences.default_connection_ready &&
+    defaultConnectionId !== preferences.default_connection_id
+  ) {
+    const { error } = await supabase
+      .from('gateway_settings')
+      .update({ default_connection_id: defaultConnectionId })
+      .eq('user_id', userId);
+    if (error) throw error;
+  }
+
   return {
-    connections: connectionsResult.data ?? [],
+    connections,
+    default_connection_id: defaultConnectionId,
+    default_connection_ready: preferences.default_connection_ready,
     batch_size: preferences.batch_size,
     max_retries: preferences.max_retries,
     updated_at: preferences.updated_at,
@@ -140,6 +205,7 @@ export async function createGatewayConnection(input: ConnectionInput): Promise<G
   const api_key = input.api_key.trim();
   if (!api_key) throw new Error('أدخل مفتاح الربط');
   const userId = await requireUserId();
+  const settings = await fetchGatewaySettings();
 
   const { data, error } = await supabase
     .from('gateway_connections')
@@ -147,7 +213,44 @@ export async function createGatewayConnection(input: ConnectionInput): Promise<G
     .select(CONNECTION_COLUMNS)
     .single();
   if (error) throw error;
+
+  if (!settings.default_connection_id && settings.default_connection_ready) {
+    const { error: defaultError } = await supabase
+      .from('gateway_settings')
+      .update({ default_connection_id: data.id })
+      .eq('user_id', userId)
+      .is('default_connection_id', null);
+    if (defaultError) throw defaultError;
+  }
   return data;
+}
+
+export async function saveDefaultGatewayConnection(id: string): Promise<GatewaySettings> {
+  const userId = await requireUserId();
+  const { data: connection, error: connectionError } = await supabase
+    .from('gateway_connections')
+    .select('id')
+    .eq('id', id)
+    .eq('user_id', userId)
+    .maybeSingle();
+  if (connectionError) throw connectionError;
+  if (!connection) throw new Error('لم يتم العثور على خدمة الإرسال المحددة.');
+
+  const { data, error } = await supabase
+    .from('gateway_settings')
+    .update({ default_connection_id: id, updated_at: new Date().toISOString() })
+    .eq('user_id', userId)
+    .select('user_id')
+    .maybeSingle();
+  if (error) {
+    if (isMissingDefaultConnectionColumn(error)) {
+      throw new Error('حدّث قاعدة البيانات بتطبيق ترحيل default_gateway_connection أولاً.');
+    }
+    throw error;
+  }
+  if (!data) throw new Error('تعذر حفظ خدمة الإرسال الافتراضية.');
+
+  return fetchGatewaySettings();
 }
 
 export async function updateGatewayConnection(
