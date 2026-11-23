@@ -7,6 +7,7 @@ import { useState, useEffect, useCallback, useRef } from 'react';
 import { ActivityIndicator, FlatList, Pressable, ScrollView, StyleSheet, Text, View } from 'react-native';
 import {
   ArrowRight,
+  AlertTriangle,
   Check,
   FileSpreadsheet,
   MessageSquareText,
@@ -563,6 +564,25 @@ export function DocumentImportModal({
               </View>
             ) : null}
 
+            {!canSendDirectly ? (
+              <View style={styles.directConnectionNotice}>
+                <AlertTriangle size={16} color={colors.warning[600]} strokeWidth={2} />
+                <Text style={styles.directConnectionNoticeText}>
+                  اضبط خدمة الإرسال الافتراضية من الإعدادات قبل إرسال الرسائل.
+                </Text>
+                {onOpenSettings ? (
+                  <Pressable
+                    accessibilityRole="button"
+                    accessibilityLabel="فتح إعدادات الإرسال"
+                    onPress={onOpenSettings}
+                    style={styles.directSettingsLink}
+                  >
+                    <Text style={styles.directSettingsLinkText}>فتح الإعدادات</Text>
+                  </Pressable>
+                ) : null}
+              </View>
+            ) : null}
+
             <View style={styles.directButtonRow}>
               <Pressable
                 accessibilityRole="button"
@@ -583,7 +603,7 @@ export function DocumentImportModal({
                 accessibilityRole="button"
                 accessibilityLabel={`إرسال مباشر إلى ${document.rowCount} مستلم`}
                 onPress={() => void handleDirectSend()}
-                disabled={submitting || allRecords.length === 0}
+                disabled={submitting || allRecords.length === 0 || !canSendDirectly}
                 style={({ pressed }) => [
                   styles.primaryButton,
                   styles.directActionButton,
@@ -1065,6 +1085,34 @@ const styles = StyleSheet.create({
     flexDirection: 'row-reverse',
     gap: spacing.sm,
     paddingVertical: spacing.xs,
+  },
+  directConnectionNotice: {
+    width: '100%',
+    flexDirection: 'row-reverse',
+    alignItems: 'center',
+    gap: 8,
+    padding: spacing.sm,
+    borderRadius: 12,
+    borderWidth: 1,
+    borderColor: colors.warning[500],
+    backgroundColor: colors.warning[500] + '12',
+  },
+  directConnectionNoticeText: {
+    flex: 1,
+    fontFamily: fonts.regular,
+    fontSize: 12,
+    lineHeight: 18,
+    color: colors.neutral[700],
+    textAlign: 'right',
+  },
+  directSettingsLink: {
+    minHeight: 36,
+    justifyContent: 'center',
+  },
+  directSettingsLinkText: {
+    fontFamily: fonts.semibold,
+    fontSize: 12,
+    color: colors.primary[700],
   },
   directActionButton: {
     flex: 1,
