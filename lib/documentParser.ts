@@ -350,7 +350,9 @@ async function parsePdfDocument(uri: string, fileName: string): Promise<Document
       .sort(([yA], [yB]) => yB - yA)
       .map(([, parts]) => normalizeArabicDocumentText(parts.join(' ').replace(/\s+/g, ' ')))
       .filter(Boolean);
-    if (orderedLines.length > 0) pages.push(...orderedLines);
+    if (orderedLines.length > 0) {
+      pages.push(`صفحة ${pageNumber}\n${orderedLines.join('\n')}`);
+    }
   }
 
   if (pages.length === 0) {

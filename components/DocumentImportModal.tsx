@@ -636,26 +636,28 @@ export function DocumentImportModal({
 
           <View style={styles.previewSection}>
             <Text style={styles.sectionTitle}>معاينة البيانات</Text>
-            <View style={styles.previewTable}>
-              <View style={styles.previewHeader}>
-                {document.columns.slice(0, 4).map((col) => (
-                  <View key={col} style={styles.previewHeaderCell}>
-                    <Text style={styles.previewHeaderText} numberOfLines={1}>{col}</Text>
-                  </View>
-                ))}
-              </View>
-              {sampleRecords.slice(0, 2).map((record, idx) => (
-                <View key={idx} style={styles.previewRow}>
-                  {document.columns.slice(0, 4).map((col) => (
-                    <View key={col} style={styles.previewCell}>
-                      <Text style={styles.previewCellText} numberOfLines={1}>
-                        {record[col] || '-'}
-                      </Text>
+            <ScrollView horizontal showsHorizontalScrollIndicator={true}>
+              <View style={styles.previewTable}>
+                <View style={styles.previewHeader}>
+                  {document.columns.map((col) => (
+                    <View key={col} style={styles.previewHeaderCell}>
+                      <Text style={styles.previewHeaderText}>{col}</Text>
                     </View>
                   ))}
                 </View>
-              ))}
-            </View>
+                {(allRecords.length > 0 ? allRecords : sampleRecords).map((record, idx) => (
+                  <View key={idx} style={styles.previewRow}>
+                    {document.columns.map((col) => (
+                      <View key={col} style={styles.previewCell}>
+                        <Text style={styles.previewCellText}>
+                          {record[col] || '-'}
+                        </Text>
+                      </View>
+                    ))}
+                  </View>
+                ))}
+              </View>
+            </ScrollView>
           </View>
 
           {error && (
@@ -1148,9 +1150,10 @@ const styles = StyleSheet.create({
     borderBottomColor: colors.neutral[200],
   },
   previewHeaderCell: {
-    flex: 1,
+    flexGrow: 0,
+    flexShrink: 0,
     padding: spacing.xs,
-    minWidth: 60,
+    width: 150,
   },
   previewHeaderText: {
     fontFamily: fonts.semibold,
@@ -1164,7 +1167,9 @@ const styles = StyleSheet.create({
     borderBottomColor: colors.neutral[100],
   },
   previewCell: {
-    flex: 1,
+    flexGrow: 0,
+    flexShrink: 0,
+    width: 150,
     padding: spacing.xs,
     minWidth: 60,
   },

@@ -423,7 +423,7 @@ export default function DirectSendScreen() {
                       <View style={[styles.radio, selected && styles.radioSelected]} />
                       <View style={styles.optionCopy}>
                         <Text style={styles.optionTitle}>{template.title}</Text>
-                        <Text style={styles.optionSub} numberOfLines={2}>{template.body}</Text>
+                        <Text style={styles.optionSub}>{template.body}</Text>
                       </View>
                     </Pressable>
                   );
@@ -474,7 +474,7 @@ export default function DirectSendScreen() {
               {recipients.length} رسالة جاهزة للإرسال
             </Text>
             <View style={styles.previewList}>
-              {recipients.slice(0, 4).map((recipient, index) => (
+              {recipients.map((recipient, index) => (
                 <View key={`${recipient.phone}-${index}`} style={styles.previewItem}>
                   <View style={styles.previewTop}>
                     <Text style={styles.optionTitle}>{recipient.name}</Text>
@@ -483,9 +483,6 @@ export default function DirectSendScreen() {
                   <Text style={styles.messageText}>{recipient.message}</Text>
                 </View>
               ))}
-              {recipients.length > 4 ? (
-                <Text style={styles.mutedText}>و{recipients.length - 4} رسائل أخرى</Text>
-              ) : null}
             </View>
             <Pressable
               accessibilityRole="button"
@@ -531,7 +528,6 @@ export default function DirectSendScreen() {
             </Text>
             {sendResult.recipients
               .filter((recipient) => recipient.status === 'failed')
-              .slice(0, 5)
               .map((recipient, index) => (
                 <View key={`${recipient.phone}-${index}`} style={styles.failureItem}>
                   <Text style={styles.optionTitle}>{recipient.name} · {recipient.phone}</Text>

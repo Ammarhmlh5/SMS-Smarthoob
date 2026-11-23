@@ -479,7 +479,7 @@ export function TemplateForm({ template, initialValues, onSaved, onCancel }: Tem
                     <View style={localStyles.columnInfo}>
                       <Text style={localStyles.columnTitle}>{col.rawName || col.name}</Text>
                       {col.sampleValue ? (
-                        <Text style={localStyles.columnSample} numberOfLines={1}>
+                        <Text style={localStyles.columnSample}>
                           مثال: {col.sampleValue}
                         </Text>
                       ) : null}
