@@ -7,6 +7,7 @@ import * as FileSystem from 'expo-file-system/legacy';
 import * as DocumentPicker from 'expo-document-picker';
 import { Platform } from 'react-native';
 import bidiFactory from 'bidi-js';
+import * as XLSX from 'xlsx';
 import { parseCSV } from '@/lib/csv';
 
 const bidi = bidiFactory();
@@ -280,10 +281,146 @@ function analyzeColumn(name: string, values: string[]): ColumnInfo {
 // Main Parse Function
 // =====================
 
+function buildDocumentAnalysis(
+  headers: string[],
+  records: Record<string, string>[],
+  columnInfo: Record<string, ColumnInfo>,
+  fileName: string,
+): DocumentAnalysis {
+  let suggestedPhoneColumn: string | undefined;
+  let suggestedNameColumn: string | undefined;
+  for (const header of headers) {
+    if (columnInfo[header]?.type === 'phone' && !suggestedPhoneColumn) {
+      suggestedPhoneColumn = header;
+    }
+    if (columnInfo[header]?.type === 'name' && !suggestedNameColumn) {
+      suggestedNameColumn = header;
+    }
+  }
+  return {
+    columns: headers,
+    columnInfo,
+    rowCount: records.length,
+    fileName,
+    records,
+    suggestedPhoneColumn,
+    suggestedNameColumn,
+  };
+}
+
+async function parsePdfDocument(uri: string, fileName: string): Promise<DocumentAnalysis> {
+  let data: Uint8Array;
+  if (Platform.OS === 'web') {
+    const response = await fetch(uri);
+    if (!response.ok) throw new Error('تعذر قراءة ملف PDF المختار.');
+    data = new Uint8Array(await response.arrayBuffer());
+  } else {
+    const base64 = await FileSystem.readAsStringAsync(uri, {
+      encoding: FileSystem.EncodingType.Base64,
+    });
+    const binary = globalThis.atob(base64);
+    data = new Uint8Array(binary.length);
+    for (let index = 0; index < binary.length; index += 1) {
+      data[index] = binary.charCodeAt(index);
+    }
+  }
+
+  const pdfjs = await import('pdfjs-dist/legacy/build/pdf.mjs');
+  if (Platform.OS === 'web' && typeof window !== 'undefined') {
+    pdfjs.GlobalWorkerOptions.workerSrc = '/pdf.worker.mjs';
+  }
+  const pdf = await pdfjs.getDocument({ data }).promise;
+  const pages: string[] = [];
+
+  for (let pageNumber = 1; pageNumber <= pdf.numPages; pageNumber += 1) {
+    const page = await pdf.getPage(pageNumber);
+    const content = await page.getTextContent();
+    const items = content.items
+      .filter((item): item is typeof item & { str: string; transform: number[] } =>
+        typeof item === 'object' && 'str' in item && 'transform' in item,
+      );
+    const lines = new Map<number, string[]>();
+    for (const item of items) {
+      const y = Math.round(item.transform[5] / 3) * 3;
+      const line = lines.get(y) ?? [];
+      line.push(item.str);
+      lines.set(y, line);
+    }
+    const orderedLines = [...lines.entries()]
+      .sort(([yA], [yB]) => yB - yA)
+      .map(([, parts]) => normalizeArabicDocumentText(parts.join(' ').replace(/\s+/g, ' ')))
+      .filter(Boolean);
+    if (orderedLines.length > 0) pages.push(...orderedLines);
+  }
+
+  if (pages.length === 0) {
+    throw new Error('لا يحتوي ملف PDF على نص قابل للاستخراج.');
+  }
+
+  const headers = ['رقم الصفحة', 'النص المستخرج'];
+  const records: Record<string, string>[] = pages.map((text, index) => ({
+    'رقم الصفحة': String(Math.floor(index / 40) + 1),
+    'النص المستخرج': text,
+  }));
+  const columnInfo: Record<string, ColumnInfo> = {
+    'رقم الصفحة': analyzeColumn('رقم الصفحة', records.map((row) => row['رقم الصفحة'])),
+    'النص المستخرج': analyzeColumn('النص المستخرج', records.map((row) => row['النص المستخرج'])),
+  };
+  return buildDocumentAnalysis(headers, records, columnInfo, fileName);
+}
+
 export async function parseDocumentFile(uri: string, fileName: string): Promise<DocumentAnalysis> {
   try {
     console.log('parseDocumentFile called with:', uri, fileName);
-    
+
+    const lowerName = fileName.toLowerCase();
+    if (lowerName.endsWith('.xlsx') || lowerName.endsWith('.xls')) {
+      let data: ArrayBuffer;
+      if (Platform.OS === 'web') {
+        const response = await fetch(uri);
+        if (!response.ok) throw new Error('تعذر قراءة ملف Excel المختار.');
+        data = await response.arrayBuffer();
+      } else {
+        const base64 = await FileSystem.readAsStringAsync(uri, {
+          encoding: FileSystem.EncodingType.Base64,
+        });
+        const binary = globalThis.atob(base64);
+        const bytes = new Uint8Array(binary.length);
+        for (let index = 0; index < binary.length; index += 1) {
+          bytes[index] = binary.charCodeAt(index);
+        }
+        data = bytes.buffer;
+      }
+
+      const workbook = XLSX.read(data, { type: 'array' });
+      const sheetName = workbook.SheetNames[0];
+      if (!sheetName) throw new Error('لا يحتوي ملف Excel على أوراق بيانات.');
+
+      const rows = XLSX.utils.sheet_to_json<Record<string, unknown>>(workbook.Sheets[sheetName], {
+        defval: '',
+        raw: false,
+      });
+      if (rows.length === 0) throw new Error('ملف Excel فارغ أو لا يحتوي على صفوف بيانات.');
+
+      const headers = Object.keys(rows[0]).filter((header) => header.trim().length > 0);
+      if (headers.length === 0) throw new Error('لم يتم العثور على عناوين أعمدة داخل ملف Excel.');
+
+      const records = rows.map((row) => Object.fromEntries(
+        headers.map((header) => [header, normalizeArabicDocumentText(String(row[header] ?? '').trim())]),
+      ));
+      const columnInfo: Record<string, ColumnInfo> = {};
+      for (const header of headers) {
+        columnInfo[header] = analyzeColumn(header, records.map((row) => row[header] || ''));
+      }
+
+      return buildDocumentAnalysis(headers, records, columnInfo, fileName);
+    }
+
+    if (lowerName.endsWith('.pdf')) {
+      const pdf = await parsePdfDocument(uri, fileName);
+      return pdf;
+    }
+
     let content: string;
     if (Platform.OS === 'web') {
       const response = await fetch(uri);

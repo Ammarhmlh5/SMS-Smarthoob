@@ -22,13 +22,10 @@ import {
   MessageSquare,
   Sparkles,
 } from 'lucide-react-native';
-import { useAuth } from '@/lib/auth';
 import {
   pickDocument,
   parseDocumentFile,
-  pickedDocumentToUploadFile,
 } from '@/lib/documentParser';
-import { parseDocument } from '@/lib/api';
 import { createTemplate, updateTemplate, extractPlaceholders, type MessageTemplate } from '@/lib/templates';
 import { colors, fonts, spacing } from '@/constants/theme';
 
@@ -58,7 +55,6 @@ function validate(title: string, body: string): string | null {
 }
 
 export function TemplateForm({ template, initialValues, onSaved, onCancel }: TemplateFormProps) {
-  const { session } = useAuth();
   const isEdit = template !== null;
 
   // الخطوات: step1_info (الاسم والمستند) | step2_message (نص الرسالة وقائمة الأعمدة المستخرجة)
@@ -106,30 +102,11 @@ export function TemplateForm({ template, initialValues, onSaved, onCancel }: Tem
         setTitle(cleanName);
       }
 
-      const lowerName = result.name.toLowerCase();
-      const mimeType = lowerName.endsWith('.pdf')
-        ? 'application/pdf'
-        : lowerName.endsWith('.xlsx')
-        ? 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet'
-        : lowerName.endsWith('.xls')
-        ? 'application/vnd.ms-excel'
-        : 'text/csv';
-
       let columns: string[] = [];
       let sampleData: Record<string, string> = {};
-
-      if (lowerName.endsWith('.csv')) {
-        const localParsed = await parseDocumentFile(result.uri, result.name);
-        columns = localParsed.columns;
-        if (localParsed.records?.length) sampleData = localParsed.records[0];
-      } else {
-        const userId = session?.user?.id || 'default';
-        const uploadFile = await pickedDocumentToUploadFile(result, mimeType);
-
-        const parsed = await parseDocument(uploadFile, userId);
-        columns = parsed.columns;
-        if (parsed.sampleData?.length) sampleData = parsed.sampleData[0];
-      }
+      const localParsed = await parseDocumentFile(result.uri, result.name);
+      columns = localParsed.columns;
+      if (localParsed.records?.length) sampleData = localParsed.records[0];
 
       if (columns.length === 0) {
         throw new Error('لم يتم العثور على أي أعمدة داخل المستند المختار.');
