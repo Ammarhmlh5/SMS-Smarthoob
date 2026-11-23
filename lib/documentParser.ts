@@ -357,15 +357,56 @@ async function parsePdfDocument(uri: string, fileName: string): Promise<Document
     throw new Error('لا يحتوي ملف PDF على نص قابل للاستخراج.');
   }
 
-  const headers = ['رقم الصفحة', 'النص المستخرج'];
-  const records: Record<string, string>[] = pages.map((text, index) => ({
-    'رقم الصفحة': String(Math.floor(index / 40) + 1),
-    'النص المستخرج': text,
-  }));
-  const columnInfo: Record<string, ColumnInfo> = {
-    'رقم الصفحة': analyzeColumn('رقم الصفحة', records.map((row) => row['رقم الصفحة'])),
-    'النص المستخرج': analyzeColumn('النص المستخرج', records.map((row) => row['النص المستخرج'])),
+  const headers = [
+    'رقم المشترك',
+    'اسم المشترك',
+    'رقم الهاتف',
+    'العنوان',
+    'رقم العداد',
+    'تاريخ الإصدار',
+    'المبلغ المستحق',
+    'المتأخرات',
+    'الاستهلاك',
+  ];
+
+  const extractValue = (text: string, labels: string[], fallback = ''): string => {
+    for (const label of labels) {
+      const match = new RegExp(`${label}[^0-9A-Za-z]*([0-9٠-٩]+(?:[\\s./-][0-9٠-٩]+)*|[^\\n/]{2,80})`, 'u').exec(text);
+      if (match?.[1]?.trim()) return normalizeArabicDocumentText(match[1].trim());
+    }
+    return fallback;
   };
+
+  const records: Record<string, string>[] = pages.map((text) => {
+    const pageText = normalizeArabicDocumentText(text);
+    const phone = pageText.match(/(?:777|775|773|776|770|771|772|778|779)[0-9]{6,7}/)?.[0] ?? '';
+    const subscriber = pageText.match(/رقم المشترك[^0-9]*(?:[-/]?[\s]*)(\d+)/)?.[1]
+      ?? pageText.match(/\b(\d{3})[-/]\d{4,6}\b/)?.[1]
+      ?? '';
+    return {
+      'رقم المشترك': subscriber,
+      'اسم المشترك': extractValue(pageText, ['إسم المشترك', 'اسم المشترك'], ''),
+      'رقم الهاتف': phone,
+      'العنوان': extractValue(pageText, ['العنوان'], ''),
+      'رقم العداد': extractValue(pageText, ['رقم العداد'], ''),
+      'تاريخ الإصدار': extractValue(pageText, ['تاريخ الإصدار'], ''),
+      'المبلغ المستحق': extractValue(pageText, ['المبلغ المستحق'], ''),
+      'المتأخرات': extractValue(pageText, ['المتأخرات'], ''),
+      'الاستهلاك': extractValue(pageText, ['الاستهلاك'], ''),
+    };
+  });
+
+  const hasRealData = records.some((record) =>
+    record['رقم المشترك'] || record['اسم المشترك'] || record['رقم الهاتف'] || record['العنوان'],
+  );
+  if (!hasRealData) {
+    throw new Error('تم قراءة ملف PDF، لكن لم يتم العثور على حقول فاتورة واضحة مثل رقم المشترك أو الاسم أو الهاتف.');
+  }
+
+  const columnInfo: Record<string, ColumnInfo> = {};
+  for (const header of headers) {
+    columnInfo[header] = analyzeColumn(header, records.map((row) => row[header] || ''));
+  }
   return buildDocumentAnalysis(headers, records, columnInfo, fileName);
 }
 
