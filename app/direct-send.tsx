@@ -7,9 +7,10 @@ import {
   ScrollView,
   StyleSheet,
   Text,
+  TextInput,
   View,
 } from 'react-native';
-import { useFocusEffect, useRouter } from 'expo-router';
+import { useFocusEffect, useLocalSearchParams, useRouter } from 'expo-router';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import {
   ArrowRight,
@@ -24,47 +25,72 @@ import { DocumentImportModal } from '@/components/DocumentImportModal';
 import { Field } from '@/components/FormField';
 import { colors, fonts, spacing } from '@/constants/theme';
 import { useShareIntentContext } from 'expo-share-intent';
+import { pickDocument } from '@/lib/documentParser';
 import { fetchGatewaySettings } from '@/lib/gatewaySettings';
 import type { GatewaySettings } from '@/lib/gatewaySettings';
 import { extractPlaceholders, fetchTemplates, renderMessage } from '@/lib/templates';
 import type { MessageTemplate } from '@/lib/templates';
 import type { DocumentAnalysis } from '@/lib/documentParser';
 import { buildDocumentRecipients } from '@/lib/documentRecipients';
-import type { DocumentRecipientMapping } from '@/lib/documentRecipients';
+import type { DocumentMessageMode, DocumentRecipientMapping } from '@/lib/documentRecipients';
 import { sendDirectMessages } from '@/lib/directSend';
 import type { DirectSendRecipient, DirectSendResult } from '@/lib/directSend';
+import { sendCampaign } from '@/lib/campaigns';
+
+const DEFAULT_CONNECTION_REQUIRED_MESSAGE = 'اضبط خدمة الإرسال الافتراضية من الإعدادات أولاً.';
 
 type SendStep = 'setup' | 'preview' | 'sending' | 'result';
 
 export default function DirectSendScreen() {
   const insets = useSafeAreaInsets();
   const router = useRouter();
+  const params = useLocalSearchParams<{ mode?: string; campaign?: string }>();
+  const isCampaignFlow = params.campaign === '1';
+  const preferredMode = params.mode === 'template' ? 'template' : null;
   const { hasShareIntent, shareIntent, resetShareIntent } = useShareIntentContext();
   const handledShareIntent = useRef(false);
   const [gatewaySettings, setGatewaySettings] = useState<GatewaySettings | null>(null);
   const [templates, setTemplates] = useState<MessageTemplate[]>([]);
   const [selectedTemplate, setSelectedTemplate] = useState('');
+  const [messageMode, setMessageMode] = useState<DocumentMessageMode | null>(preferredMode);
   const [recipients, setRecipients] = useState<DirectSendRecipient[]>([]);
   const [sourceName, setSourceName] = useState('');
   const [step, setStep] = useState<SendStep>('setup');
   const [showImportModal, setShowImportModal] = useState(false);
   const [sharedFile, setSharedFile] = useState<{ uri: string; name: string } | null>(null);
   const [loading, setLoading] = useState(true);
+  const [pickingDocument, setPickingDocument] = useState(false);
   const [sending, setSending] = useState(false);
+  const sendingRef = useRef(false);
   const [error, setError] = useState<string | null>(null);
   const [sendResult, setSendResult] = useState<DirectSendResult | null>(null);
   const [progress, setProgress] = useState({ sent: 0, failed: 0, processed: 0, total: 0 });
+  const [campaignName, setCampaignName] = useState('');
 
   const load = useCallback(async () => {
     setLoading(true);
     setError(null);
     try {
-      const [settings, templateList] = await Promise.all([
+      const [settingsResult, templateResult] = await Promise.allSettled([
         fetchGatewaySettings(),
         fetchTemplates(),
       ]);
-      setGatewaySettings(settings);
+
+      if (settingsResult.status === 'fulfilled') {
+        setGatewaySettings(settingsResult.value);
+      } else {
+        setGatewaySettings(null);
+      }
+
+      if (templateResult.status !== 'fulfilled') {
+        throw templateResult.reason instanceof Error
+          ? templateResult.reason
+          : new Error('تعذر تحميل القوالب.');
+      }
+
+      const templateList = templateResult.value;
       setTemplates(templateList);
+      if (isCampaignFlow) setMessageMode('template');
       setSelectedTemplate((current) => {
         if (templateList.some((template) => template.id === current)) return current;
         return (templateList.find((template) => template.is_default) ?? templateList[0])?.id ?? '';
@@ -74,7 +100,7 @@ export default function DirectSendScreen() {
     } finally {
       setLoading(false);
     }
-  }, []);
+  }, [isCampaignFlow]);
 
   useFocusEffect(useCallback(() => {
     void load();
@@ -89,15 +115,36 @@ export default function DirectSendScreen() {
     if (!file || handledShareIntent.current) return;
     handledShareIntent.current = true;
     setSharedFile({ uri: file.path, name: file.fileName });
-    setShowImportModal(true);
     resetShareIntent();
   }, [hasShareIntent, shareIntent.files, resetShareIntent]);
+
+  useEffect(() => {
+    if (!sharedFile || !messageMode) return;
+    const openImportTimer = setTimeout(() => setShowImportModal(true), 0);
+    return () => clearTimeout(openImportTimer);
+  }, [messageMode, sharedFile]);
 
   const selectedTemplateObject = templates.find((template) => template.id === selectedTemplate);
   const placeholders = useMemo(
     () => selectedTemplateObject ? extractPlaceholders(selectedTemplateObject.body) : [],
     [selectedTemplateObject],
   );
+  const canImportDocument =
+    messageMode === 'prepared' || (messageMode === 'template' && Boolean(selectedTemplateObject));
+  const handleSelectDocument = async () => {
+    setError(null);
+    setPickingDocument(true);
+    try {
+      const file = await pickDocument();
+      if (!file) return;
+      setSharedFile(file);
+    } catch (pickError) {
+      setError(pickError instanceof Error ? pickError.message : 'تعذر اختيار المستند.');
+    } finally {
+      setPickingDocument(false);
+    }
+  };
+
   const handleDocumentMapped = useCallback((
     mapping: Record<string, string>,
     document?: DocumentAnalysis,
@@ -137,26 +184,101 @@ export default function DirectSendScreen() {
     }
   }, [selectedTemplateObject]);
 
-  const handleSend = async () => {
-    const defaultConnectionId = gatewaySettings?.default_connection_id;
-    if (!defaultConnectionId) {
-      setError('اضبط خدمة الإرسال الافتراضية من الإعدادات أولاً.');
-      return;
+  const executeSend = useCallback(async (targetRecipients: DirectSendRecipient[]) => {
+    if (sendingRef.current) throw new Error('هناك عملية إرسال قيد التنفيذ بالفعل.');
+    if (isCampaignFlow && !campaignName.trim()) {
+      throw new Error('أدخل اسم الحملة قبل الإرسال.');
     }
+    sendingRef.current = true;
     setSending(true);
     setError(null);
-    setProgress({ sent: 0, failed: 0, processed: 0, total: recipients.length });
+    setProgress({ sent: 0, failed: 0, processed: 0, total: targetRecipients.length });
     setStep('sending');
     try {
-      const result = await sendDirectMessages(defaultConnectionId, recipients, setProgress);
-      setSendResult(result);
+      const currentGatewaySettings = await fetchGatewaySettings();
+      setGatewaySettings(currentGatewaySettings);
+      const defaultConnectionId = currentGatewaySettings.default_connection_id;
+      if (!defaultConnectionId) {
+        throw new Error(DEFAULT_CONNECTION_REQUIRED_MESSAGE);
+      }
+
+      let sendResultValue: DirectSendResult;
+      if (isCampaignFlow) {
+        const campaignResult = await sendCampaign({
+          connection_id: defaultConnectionId,
+          template_id: selectedTemplate || null,
+          campaign_name: campaignName.trim(),
+          batch_size: currentGatewaySettings.batch_size,
+          max_retries: currentGatewaySettings.max_retries,
+          recipients: targetRecipients,
+        }, setProgress);
+        sendResultValue = {
+          total: campaignResult.total,
+          sent: campaignResult.sent,
+          failed: campaignResult.failed,
+          recipients: [],
+        };
+      } else {
+        sendResultValue = await sendDirectMessages(defaultConnectionId, targetRecipients, setProgress);
+      }
+      setSendResult(sendResultValue);
       setStep('result');
+      return sendResultValue;
+    } finally {
+      sendingRef.current = false;
+      setSending(false);
+    }
+  }, [isCampaignFlow, campaignName, selectedTemplate]);
+
+  const handleSend = async () => {
+    try {
+      await executeSend(recipients);
     } catch (sendError) {
       setError(sendError instanceof Error ? sendError.message : 'تعذر تنفيذ الإرسال المباشر.');
       setStep('preview');
-    } finally {
-      setSending(false);
     }
+  };
+
+  const handlePreparedDirectSend = useCallback(async (
+    mapping: Record<string, string>,
+    document: DocumentAnalysis,
+    recipientMapping: DocumentRecipientMapping,
+  ) => {
+    const mappedRecipients = buildDocumentRecipients({
+      columns: document.columns,
+      records: document.records ?? [],
+      rowCount: document.rowCount,
+      mapping,
+      recipientMapping,
+      suggestedPhoneColumn: document.suggestedPhoneColumn,
+      suggestedNameColumn: document.suggestedNameColumn,
+      templateBody: selectedTemplateObject?.body,
+      renderMessage,
+    });
+
+    setRecipients(mappedRecipients);
+    setSourceName(document.fileName);
+    setSendResult(null);
+    try {
+      await executeSend(mappedRecipients);
+      setShowImportModal(false);
+      setSharedFile(null);
+    } catch (sendError) {
+      setStep('setup');
+      throw sendError;
+    }
+  }, [executeSend, selectedTemplateObject]);
+
+  const handleCancelImport = () => {
+    if (sending) return;
+    setShowImportModal(false);
+    setSharedFile(null);
+  };
+
+  const handleOpenGatewaySettings = () => {
+    if (sending) return;
+    handleCancelImport();
+    router.push('/(tabs)/settings');
   };
 
   const resetDirectSend = () => {
@@ -166,6 +288,7 @@ export default function DirectSendScreen() {
     setSendResult(null);
     setProgress({ sent: 0, failed: 0, processed: 0, total: 0 });
     setError(null);
+    if (isCampaignFlow) setCampaignName('');
   };
 
   if (loading) {
@@ -186,15 +309,25 @@ export default function DirectSendScreen() {
         <View style={styles.header}>
           <Pressable
             accessibilityRole="button"
-            accessibilityLabel="العودة إلى لوحة التحكم"
-            onPress={() => router.back()}
+            accessibilityLabel={isCampaignFlow ? 'العودة إلى الحملات' : 'العودة إلى لوحة التحكم'}
+            onPress={() => {
+              if (isCampaignFlow) {
+                router.replace('/(tabs)/campaigns');
+              } else {
+                router.back();
+              }
+            }}
             style={({ pressed }) => [styles.backButton, pressed && styles.pressed]}
           >
             <ArrowRight size={20} color={colors.neutral[700]} />
           </Pressable>
           <View style={styles.headerCopy}>
-            <Text style={styles.title}>إرسال مباشر</Text>
-            <Text style={styles.subtitle}>أرسل من مستند دون إنشاء حملة أو إضافتها إلى سجل الحملات</Text>
+            <Text style={styles.title}>{isCampaignFlow ? 'إنشاء حملة جديدة' : 'إرسال مباشر'}</Text>
+            <Text style={styles.subtitle}>
+              {isCampaignFlow
+                ? 'اختر القالب، أدخل اسم الحملة، ثم جهّز المستند للإرسال'
+                : 'اختر نوع الرسائل، ثم جهّز المستند للمعاينة والإرسال'}
+            </Text>
           </View>
         </View>
 
@@ -202,7 +335,11 @@ export default function DirectSendScreen() {
           <View style={styles.errorBox}>
             <XCircle size={18} color={colors.error[600]} />
             <Text style={styles.errorText}>{error}</Text>
-            {!gatewaySettings ? (
+            {error === DEFAULT_CONNECTION_REQUIRED_MESSAGE ? (
+              <Pressable onPress={() => router.push('/(tabs)/settings')} style={styles.settingsLink}>
+                <Text style={styles.settingsLinkText}>فتح الإعدادات</Text>
+              </Pressable>
+            ) : !gatewaySettings ? (
               <Pressable onPress={() => void load()} style={styles.settingsLink}>
                 <Text style={styles.settingsLinkText}>إعادة المحاولة</Text>
               </Pressable>
@@ -210,69 +347,119 @@ export default function DirectSendScreen() {
           </View>
         ) : null}
 
-        {!gatewaySettings?.default_connection_id ? (
-          <View style={styles.noticeBox}>
-            <Text style={styles.errorText}>لا توجد خدمة إرسال افتراضية. اضبطها من الإعدادات للبدء.</Text>
-            <Pressable onPress={() => router.push('/(tabs)/settings')} style={styles.settingsLink}>
-              <Text style={styles.settingsLinkText}>فتح الإعدادات</Text>
-            </Pressable>
+        {isCampaignFlow && step === 'setup' ? (
+          <View style={styles.campaignNameField}>
+            <Text style={styles.fieldLabel}>اسم الحملة</Text>
+            <TextInput
+              value={campaignName}
+              onChangeText={setCampaignName}
+              placeholder="مثال: فواتير شهر نوفمبر"
+              placeholderTextColor={colors.neutral[400]}
+              style={styles.campaignNameInput}
+            />
           </View>
         ) : null}
 
-        {templates.length ? (
-          <Field label="القالب الافتراضي للرسائل غير الجاهزة" Icon={Layers}>
+        {step === 'setup' && !isCampaignFlow ? (
+          <View style={styles.modeSection}>
+            <Text style={styles.sectionTitle}>اختر نوع الرسائل</Text>
             <View style={styles.optionList}>
-              {templates.map((template) => {
-                const selected = selectedTemplate === template.id;
-                return (
-                  <Pressable
-                    key={template.id}
-                    accessibilityRole="button"
-                    accessibilityState={{ selected, disabled: step !== 'setup' }}
-                    onPress={() => setSelectedTemplate(template.id)}
-                    disabled={step !== 'setup'}
-                    style={({ pressed }) => [
-                      styles.option,
-                      selected && styles.optionSelected,
-                      pressed && styles.pressed,
-                      step !== 'setup' && styles.disabled,
-                    ]}
-                  >
-                    <View style={[styles.radio, selected && styles.radioSelected]} />
-                    <View style={styles.optionCopy}>
-                      <Text style={styles.optionTitle}>{template.title}</Text>
-                      <Text style={styles.optionSub} numberOfLines={2}>{template.body}</Text>
-                    </View>
-                  </Pressable>
-                );
-              })}
+              <Pressable
+                accessibilityRole="button"
+                accessibilityState={{ selected: messageMode === 'prepared' }}
+                onPress={() => setMessageMode('prepared')}
+                style={({ pressed }) => [
+                  styles.option,
+                  messageMode === 'prepared' && styles.optionSelected,
+                  pressed && styles.pressed,
+                ]}
+              >
+                <MessageSquareText size={20} color={colors.primary[700]} />
+                <View style={styles.optionCopy}>
+                  <Text style={styles.optionTitle}>رسائل جاهزة</Text>
+                  <Text style={styles.optionSub}>نص كامل لكل مستلم في عمود داخل المستند</Text>
+                </View>
+                <View style={[styles.radio, messageMode === 'prepared' && styles.radioSelected]} />
+              </Pressable>
+              <Pressable
+                accessibilityRole="button"
+                accessibilityState={{ selected: messageMode === 'template' }}
+                onPress={() => setMessageMode('template')}
+                style={({ pressed }) => [
+                  styles.option,
+                  messageMode === 'template' && styles.optionSelected,
+                  pressed && styles.pressed,
+                ]}
+              >
+                <Layers size={20} color={colors.primary[700]} />
+                <View style={styles.optionCopy}>
+                  <Text style={styles.optionTitle}>رسائل القوالب</Text>
+                  <Text style={styles.optionSub}>إنشاء الرسائل من قالب محفوظ وأعمدة المستند</Text>
+                </View>
+                <View style={[styles.radio, messageMode === 'template' && styles.radioSelected]} />
+              </Pressable>
             </View>
-          </Field>
-        ) : (
-          <View style={styles.noticeBox}>
-            <Text style={styles.noticeText}>
-              يمكن إرسال المستندات ذات الرسائل الجاهزة دون قالب. أنشئ قالباً لاستخدام المستندات الأخرى.
-            </Text>
           </View>
-        )}
+        ) : null}
 
-        {step === 'setup' ? (
+        {step === 'setup' && messageMode === 'template' ? (
+          templates.length ? (
+            <Field label="اختر القالب" Icon={Layers}>
+              <View style={styles.optionList}>
+                {templates.map((template) => {
+                  const selected = selectedTemplate === template.id;
+                  return (
+                    <Pressable
+                      key={template.id}
+                      accessibilityRole="button"
+                      accessibilityState={{ selected }}
+                      onPress={() => setSelectedTemplate(template.id)}
+                      style={({ pressed }) => [
+                        styles.option,
+                        selected && styles.optionSelected,
+                        pressed && styles.pressed,
+                      ]}
+                    >
+                      <View style={[styles.radio, selected && styles.radioSelected]} />
+                      <View style={styles.optionCopy}>
+                        <Text style={styles.optionTitle}>{template.title}</Text>
+                        <Text style={styles.optionSub} numberOfLines={2}>{template.body}</Text>
+                      </View>
+                    </Pressable>
+                  );
+                })}
+              </View>
+            </Field>
+          ) : (
+            <View style={styles.noticeBox}>
+              <Text style={styles.noticeText}>لا توجد قوالب محفوظة. أنشئ قالباً أولاً للمتابعة بهذا المسار.</Text>
+              <Pressable onPress={() => router.push('/(tabs)/templates')} style={styles.settingsLink}>
+                <Text style={styles.settingsLinkText}>فتح القوالب</Text>
+              </Pressable>
+            </View>
+          )
+        ) : null}
+
+        {step === 'setup' && messageMode ? (
           <Pressable
             accessibilityRole="button"
-            accessibilityLabel="اختيار مستند للإرسال المباشر"
-            onPress={() => {
-              setError(null);
-              setShowImportModal(true);
-            }}
-            disabled={!gatewaySettings?.default_connection_id}
+            accessibilityLabel="اختيار مستند من الجهاز للإرسال المباشر"
+            onPress={() => void handleSelectDocument()}
+            disabled={pickingDocument || !canImportDocument}
             style={({ pressed }) => [
               styles.primaryButton,
               pressed && styles.pressed,
-              !gatewaySettings?.default_connection_id && styles.disabled,
+              (pickingDocument || !canImportDocument) && styles.disabled,
             ]}
           >
-            <FileSpreadsheet size={19} color={colors.neutral[0]} />
-            <Text style={styles.primaryButtonText}>اختيار مستند للإرسال</Text>
+            {pickingDocument ? (
+              <ActivityIndicator color={colors.neutral[0]} />
+            ) : (
+              <>
+                <FileSpreadsheet size={19} color={colors.neutral[0]} />
+                <Text style={styles.primaryButtonText}>اختيار مستند من الجهاز</Text>
+              </>
+            )}
           </Pressable>
         ) : null}
 
@@ -303,11 +490,11 @@ export default function DirectSendScreen() {
             <Pressable
               accessibilityRole="button"
               onPress={handleSend}
-              disabled={sending || !gatewaySettings?.default_connection_id}
+              disabled={sending || recipients.length === 0}
               style={({ pressed }) => [
                 styles.primaryButton,
                 pressed && styles.pressed,
-                (sending || !gatewaySettings?.default_connection_id) && styles.disabled,
+                (sending || recipients.length === 0) && styles.disabled,
               ]}
             >
               <Send size={18} color={colors.neutral[0]} />
@@ -322,7 +509,9 @@ export default function DirectSendScreen() {
         {step === 'sending' ? (
           <View style={[styles.section, styles.centered]}>
             <ActivityIndicator color={colors.primary[700]} size="large" />
-            <Text style={styles.sectionTitle}>جاري الإرسال المباشر</Text>
+            <Text style={styles.sectionTitle}>
+              {isCampaignFlow ? 'جاري إرسال الحملة' : 'جاري الإرسال المباشر'}
+            </Text>
             <Text style={styles.mutedText}>
               تمت معالجة {progress.processed} من {progress.total}، نجح {progress.sent} وتعذر {progress.failed}
             </Text>
@@ -333,7 +522,9 @@ export default function DirectSendScreen() {
           <View style={styles.section}>
             <View style={styles.sectionHeading}>
               <CheckCircle2 size={20} color={sendResult.failed ? colors.warning[600] : colors.success[600]} />
-              <Text style={styles.sectionTitle}>اكتمل الإرسال المباشر</Text>
+              <Text style={styles.sectionTitle}>
+                {isCampaignFlow ? 'اكتملت الحملة' : 'اكتمل الإرسال المباشر'}
+              </Text>
             </View>
             <Text style={styles.mutedText}>
               الإجمالي {sendResult.total} · نجح {sendResult.sent} · فشل {sendResult.failed}
@@ -359,22 +550,23 @@ export default function DirectSendScreen() {
         visible={showImportModal}
         animationType="slide"
         transparent
-        onRequestClose={() => {
-          setShowImportModal(false);
-          setSharedFile(null);
-        }}
+        onRequestClose={handleCancelImport}
       >
         {showImportModal ? (
-          <DocumentImportModal
-            variables={placeholders}
-            showRecipientMapping
-            sharedFile={sharedFile}
-            onMapped={handleDocumentMapped}
-            onCancel={() => {
-              setShowImportModal(false);
-              setSharedFile(null);
-            }}
-          />
+          <View style={styles.importModalBackdrop}>
+            <DocumentImportModal
+              variables={messageMode === 'template' ? placeholders : []}
+              showRecipientMapping
+              recipientMessageMode={messageMode ?? undefined}
+              sharedFile={sharedFile}
+              onDirectSend={messageMode === 'prepared' ? handlePreparedDirectSend : undefined}
+              canSendDirectly={Boolean(gatewaySettings?.default_connection_id)}
+              directSendProgress={progress}
+              onOpenSettings={handleOpenGatewaySettings}
+              onMapped={handleDocumentMapped}
+              onCancel={handleCancelImport}
+            />
+          </View>
         ) : null}
       </Modal>
     </View>
@@ -384,6 +576,35 @@ export default function DirectSendScreen() {
 const styles = StyleSheet.create({
   screen: { flex: 1, backgroundColor: colors.neutral[50] },
   content: { paddingHorizontal: spacing.md, gap: spacing.md },
+  campaignNameField: {
+    gap: 6,
+  },
+  fieldLabel: {
+    fontFamily: fonts.semibold,
+    fontSize: 13,
+    color: colors.neutral[700],
+    textAlign: 'right',
+  },
+  campaignNameInput: {
+    height: 48,
+    borderRadius: 12,
+    borderWidth: 1,
+    borderColor: colors.neutral[200],
+    backgroundColor: colors.neutral[0],
+    paddingHorizontal: 12,
+    fontFamily: fonts.regular,
+    fontSize: 14,
+    color: colors.neutral[900],
+    textAlign: 'right',
+  },
+  importModalBackdrop: {
+    flex: 1,
+    alignItems: 'center',
+    justifyContent: 'center',
+    padding: spacing.md,
+    backgroundColor: colors.neutral[900] + '66',
+  },
+  modeSection: { gap: spacing.sm },
   centered: { alignItems: 'center', justifyContent: 'center', gap: spacing.sm },
   pressed: { opacity: 0.8 },
   disabled: { opacity: 0.5 },

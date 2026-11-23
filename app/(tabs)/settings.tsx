@@ -33,7 +33,7 @@ import { fetchGatewaySettings, saveDefaultGatewayConnection } from '@/lib/gatewa
 import type { GatewayConnection, GatewaySettings } from '@/lib/gatewaySettings';
 import { database } from '@/lib/database';
 import { checkHealth, setApiBaseUrl } from '@/lib/api';
-import { supabase } from '@/lib/supabase';
+import { isLocalApiConfigured, supabase } from '@/lib/supabase';
 import { loadSettings, saveApiBaseUrl, DEFAULT_SETTINGS } from '@/lib/settingsStore';
 import type { AppSettings } from '@/lib/settingsStore';
 import { colors, fonts, spacing } from '@/constants/theme';
@@ -139,7 +139,10 @@ export default function SettingsScreen() {
   }, [refreshSyncCount]);
 
   useEffect(() => {
-    load();
+    const timer = setTimeout(() => {
+      void load();
+    }, 0);
+    return () => clearTimeout(timer);
   }, [load]);
 
   // ─── معالجات البوابات ────────────────────────────────────────────────────────
@@ -199,8 +202,10 @@ export default function SettingsScreen() {
       await refreshSyncCount();
       setSyncFeedback(res.message);
       setLastSyncTime(new Date());
-    } catch {
-      setSyncFeedback('تعذر إتمام المزامنة مع الخادم');
+    } catch (error) {
+      const message = error instanceof Error ? error.message : 'خطأ غير معروف';
+      console.error('Manual database sync failed:', error);
+      setSyncFeedback(`تعذر إتمام المزامنة مع الخادم: ${message}`);
     } finally {
       setSyncing(false);
     }
@@ -209,7 +214,7 @@ export default function SettingsScreen() {
   const handleClearLocalData = () => {
     Alert.alert(
       'مسح البيانات المحلية',
-      'هل أنت متأكد من مسح البيانات المخزنة محلياً وإعادة المزامنة؟ لن يتم مسح بيانات السحابة.',
+      `هل أنت متأكد من مسح البيانات المخزنة محلياً وإعادة المزامنة؟ لن يتم مسح بيانات ${isLocalApiConfigured ? 'قاعدة PostgreSQL المحلية' : 'السحابة'}.`,
       [
         { text: 'إلغاء', style: 'cancel' },
         {
@@ -345,22 +350,24 @@ export default function SettingsScreen() {
                     )}
                   </View>
                 </View>
-                <Pressable
-                  accessibilityRole="button"
-                  accessibilityLabel="تسجيل الخروج"
-                  onPress={handleSignOut}
-                  disabled={signingOut}
-                  style={({ pressed }) => [styles.logoutCompactButton, pressed && styles.pressed, signingOut && styles.disabled]}
-                >
-                  {signingOut ? (
-                    <ActivityIndicator color={colors.error[600]} size="small" />
-                  ) : (
-                    <>
-                      <LogOut size={16} color={colors.error[600]} strokeWidth={2} />
-                      <Text style={styles.logoutCompactText}>خروج</Text>
-                    </>
-                  )}
-                </Pressable>
+                {!isLocalApiConfigured ? (
+                  <Pressable
+                    accessibilityRole="button"
+                    accessibilityLabel="تسجيل الخروج"
+                    onPress={handleSignOut}
+                    disabled={signingOut}
+                    style={({ pressed }) => [styles.logoutCompactButton, pressed && styles.pressed, signingOut && styles.disabled]}
+                  >
+                    {signingOut ? (
+                      <ActivityIndicator color={colors.error[600]} size="small" />
+                    ) : (
+                      <>
+                        <LogOut size={16} color={colors.error[600]} strokeWidth={2} />
+                        <Text style={styles.logoutCompactText}>خروج</Text>
+                      </>
+                    )}
+                  </Pressable>
+                ) : null}
               </View>
               {signOutError ? (
                 <Text accessibilityRole="alert" style={styles.signOutErrorText}>
@@ -522,7 +529,9 @@ export default function SettingsScreen() {
                   ) : (
                     <>
                       <RefreshCw size={16} color={colors.neutral[0]} strokeWidth={2} />
-                      <Text style={styles.actionButtonText}>مزامنة الآن مع السحابة</Text>
+                      <Text style={styles.actionButtonText}>
+                        {isLocalApiConfigured ? 'مزامنة الآن مع PostgreSQL' : 'مزامنة الآن مع السحابة'}
+                      </Text>
                     </>
                   )}
                 </Pressable>

@@ -15,7 +15,6 @@ import {
   CheckCircle2,
   Clock,
   Download,
-  FileSpreadsheet,
   Phone,
   RefreshCw,
   Users,
@@ -59,39 +58,42 @@ export function CampaignDetailModal({
 
   useEffect(() => {
     let cancelled = false;
-    if (visible && campaign) {
-      setLoading(true);
-      setLoadError(null);
-      setFilter('all');
-      setConfirmingUncertainRetry(false);
-      Promise.all([
-        database.getRecipients(campaign.id),
-        database.getCampaignQueueStats(campaign.id),
-      ])
-        .then(([data, stats]) => {
-          if (cancelled) return;
-          setRecipients(data);
-          setHasPendingQueue(canResumeCampaignQueue(stats));
-        }, (error: unknown) => {
-          if (cancelled) return;
-          setRecipients([]);
-          setHasPendingQueue(false);
-          setLoadError(
-            error instanceof Error ? error.message : 'تعذر تحميل تفاصيل الحملة من قاعدة البيانات.',
-          );
-        })
-        .finally(() => {
-          if (!cancelled) setLoading(false);
-        });
-    } else {
-      setRecipients([]);
-      setHasPendingQueue(false);
-      setLoadError(null);
-    }
+    const timer = setTimeout(() => {
+      if (visible && campaign) {
+        setLoading(true);
+        setLoadError(null);
+        setFilter('all');
+        setConfirmingUncertainRetry(false);
+        Promise.all([
+          database.getRecipients(campaign.id),
+          database.getCampaignQueueStats(campaign.id),
+        ])
+          .then(([data, stats]) => {
+            if (cancelled) return;
+            setRecipients(data);
+            setHasPendingQueue(canResumeCampaignQueue(stats));
+          }, (error: unknown) => {
+            if (cancelled) return;
+            setRecipients([]);
+            setHasPendingQueue(false);
+            setLoadError(
+              error instanceof Error ? error.message : 'تعذر تحميل تفاصيل الحملة من قاعدة البيانات.',
+            );
+          })
+          .finally(() => {
+            if (!cancelled) setLoading(false);
+          });
+      } else {
+        setRecipients([]);
+        setHasPendingQueue(false);
+        setLoadError(null);
+      }
+    }, 0);
     return () => {
+      clearTimeout(timer);
       cancelled = true;
     };
-  }, [visible, campaign?.id, reloadAttempt]);
+  }, [visible, campaign, reloadAttempt]);
 
   if (!campaign) return null;
 

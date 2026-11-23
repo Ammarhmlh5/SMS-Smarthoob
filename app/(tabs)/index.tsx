@@ -100,7 +100,12 @@ export default function MainMenuScreen() {
     }
   }, []);
 
-  useEffect(() => { loadDashboard(); }, [loadDashboard]);
+  useEffect(() => {
+    const timer = setTimeout(() => {
+      void loadDashboard();
+    }, 0);
+    return () => clearTimeout(timer);
+  }, [loadDashboard]);
 
   const onRefresh = () => {
     setRefreshing(true);

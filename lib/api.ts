@@ -3,6 +3,7 @@
  * Connects phone app to Python backend instead of Edge Functions
  */
 import { DEFAULT_SETTINGS, loadSettings } from '@/lib/settingsStore';
+import { normalizeArabicDocumentText } from '@/lib/documentParser';
 
 // Dynamic API URL based on environment
 // For Expo Go on device/emulator: use your machine's local IP
@@ -79,26 +80,26 @@ export interface MessageAnalysis {
   total: number;
   valid: number;
   errors: number;
-  issues: Array<{
+  issues: {
     row: number;
-    issues: Array<{
+    issues: {
       type: string;
       message: string;
       value?: string;
-    }>;
-  }>;
+    }[];
+  }[];
 }
 
 export interface PreparedMessages {
   campaignId: string;
-  messages: Array<{
+  messages: {
     position: number;
     recipient_name: string;
     phone: string;
     body: string;
     status: string;
     error?: string;
-  }>;
+  }[];
   summary: {
     total: number;
     valid: number;
@@ -201,13 +202,15 @@ export async function parseDocument(
   }
   const data = result.data;
   const columns = Array.isArray(data.columns)
-    ? data.columns.filter((column): column is string => typeof column === 'string')
+    ? data.columns
+        .filter((column): column is string => typeof column === 'string')
+        .map(normalizeArabicDocumentText)
     : [];
   const detectedFields = Array.isArray(data.detected_fields) ? data.detected_fields : [];
   const detectedColumns = detectedFields.flatMap((field) => {
     if (!isRecord(field) || typeof field.column_name !== 'string') return [];
     return [{
-      name: field.column_name,
+      name: normalizeArabicDocumentText(field.column_name),
       type: typeof field.detected_type === 'string' ? field.detected_type : 'unknown',
       confidence: typeof field.confidence === 'number' ? field.confidence : 0,
     }];
@@ -215,14 +218,20 @@ export async function parseDocument(
   const records = Array.isArray(data.records) && data.records.every(isRecord)
     ? data.records.map((record) =>
         Object.fromEntries(
-          Object.entries(record).map(([key, value]) => [key, String(value ?? '')]),
+          Object.entries(record).map(([key, value]) => [
+            normalizeArabicDocumentText(key),
+            normalizeArabicDocumentText(String(value ?? '')),
+          ]),
         ),
       )
     : undefined;
   const sampleData = Array.isArray(data.sample_data) && data.sample_data.every(isRecord)
     ? data.sample_data.map((record) =>
         Object.fromEntries(
-          Object.entries(record).map(([key, value]) => [key, String(value ?? '')]),
+          Object.entries(record).map(([key, value]) => [
+            normalizeArabicDocumentText(key),
+            normalizeArabicDocumentText(String(value ?? '')),
+          ]),
         ),
       )
     : undefined;
@@ -256,13 +265,13 @@ export async function suggestTemplate(
   columns: string[],
   records: Record<string, string>[],
   userId: string
-): Promise<Array<{
+): Promise<{
   template_id: string;
   template_title: string;
   match_score: number;
   variables_matched: string[];
   variables_missing: string[];
-}>> {
+}[]> {
   const result = await fetchApi<ApiResponse<{ suggestions: any[] }>>('/api/v1/ai/suggest-template', {
     method: 'POST',
     headers: { Authorization: `Bearer ${userId}` },
@@ -286,7 +295,7 @@ export async function autoLinkVariables(
 }
 
 export async function analyzeMessages(
-  messages: Array<{ phone: string; body: string }>
+  messages: { phone: string; body: string }[]
 ): Promise<{ analysis: MessageAnalysis; warnings: any[] }> {
   const result = await fetchApi<ApiResponse<{ analysis: MessageAnalysis; warnings: any[] }>>('/api/v1/ai/analyze-messages', {
     method: 'POST',

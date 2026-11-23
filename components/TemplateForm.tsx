@@ -10,7 +10,6 @@ import {
 import {
   ArrowLeft,
   ArrowRight,
-  Check,
   CheckSquare,
   FileSpreadsheet,
   FileText,
@@ -22,10 +21,13 @@ import {
   X,
   MessageSquare,
   Sparkles,
-  RotateCw,
 } from 'lucide-react-native';
 import { useAuth } from '@/lib/auth';
-import { pickDocument, parseDocumentFile } from '@/lib/documentParser';
+import {
+  pickDocument,
+  parseDocumentFile,
+  pickedDocumentToUploadFile,
+} from '@/lib/documentParser';
 import { parseDocument } from '@/lib/api';
 import { createTemplate, updateTemplate, extractPlaceholders, type MessageTemplate } from '@/lib/templates';
 import { colors, fonts, spacing } from '@/constants/theme';
@@ -122,21 +124,7 @@ export function TemplateForm({ template, initialValues, onSaved, onCancel }: Tem
         if (localParsed.records?.length) sampleData = localParsed.records[0];
       } else {
         const userId = session?.user?.id || 'default';
-        let uploadFile: any;
-
-        if (typeof window !== 'undefined' && typeof File !== 'undefined' && (result as any).file instanceof File) {
-          uploadFile = (result as any).file;
-        } else if (result.uri.startsWith('data:') && typeof window !== 'undefined' && typeof File !== 'undefined') {
-          const response = await fetch(result.uri);
-          const blob = await response.blob();
-          uploadFile = new File([blob], result.name, { type: blob.type || mimeType });
-        } else {
-          uploadFile = {
-            uri: result.uri,
-            name: result.name,
-            type: mimeType,
-          };
-        }
+        const uploadFile = await pickedDocumentToUploadFile(result, mimeType);
 
         const parsed = await parseDocument(uploadFile, userId);
         columns = parsed.columns;
@@ -200,6 +188,7 @@ export function TemplateForm({ template, initialValues, onSaved, onCancel }: Tem
 
   // حفظ القالب
   const handleSave = async () => {
+    if (saving) return;
     const validationError = validate(title, body);
     if (validationError) {
       setError(validationError);
@@ -251,17 +240,19 @@ export function TemplateForm({ template, initialValues, onSaved, onCancel }: Tem
           <View style={localStyles.fieldWrap}>
             <View style={localStyles.fieldLabelRow}>
               <Type size={16} color={colors.primary[600]} />
-              <Text style={localStyles.fieldLabel}>اسم القالب</Text>
+              <Text style={localStyles.fieldLabel}>اسم القالب *</Text>
             </View>
             <TextInput
               style={localStyles.textInput}
+              accessibilityLabel="اسم القالب، حقل مطلوب"
+              accessibilityHint="استخدم اسماً يميّز القالب عند اختياره لاحقاً"
               value={title}
               onChangeText={(txt) => {
                 setTitle(txt);
                 setError(null);
               }}
               placeholder="مثال: قالب فاتورة كهرباء، إشعار سداد، تذكير مالي..."
-              placeholderTextColor={colors.neutral[400]}
+              placeholderTextColor={colors.neutral[600]}
               maxLength={MAX_TITLE}
               textAlign="right"
               returnKeyType="next"
@@ -278,6 +269,7 @@ export function TemplateForm({ template, initialValues, onSaved, onCancel }: Tem
             <Pressable
               accessibilityRole="button"
               accessibilityLabel="استيراد مستند إكسل أو بي دي إف أو سي إس في"
+              accessibilityHint="سيتم استخراج أسماء الأعمدة والانتقال تلقائياً إلى نص الرسالة"
               disabled={importingDoc}
               onPress={handlePickAndExtractDocument}
               style={({ pressed }) => [
@@ -330,12 +322,18 @@ export function TemplateForm({ template, initialValues, onSaved, onCancel }: Tem
                 }
                 setStep('step2_message');
               }}
+              accessibilityRole="button"
+              accessibilityLabel={
+                extractedColumns.length > 0
+                  ? 'المتابعة إلى نص الرسالة والأعمدة المستخرجة'
+                  : 'المتابعة لكتابة نص الرسالة'
+              }
               style={({ pressed }) => [localStyles.continueButton, pressed && localStyles.pressed]}
             >
               <Text style={localStyles.continueButtonText}>
                 {extractedColumns.length > 0
                   ? 'المتابعة إلى نص الرسالة والأعمدة المستخرجة'
-                  : 'أو المتابعة لكتابة نص الرسالة بدون مستند'}
+                  : 'المتابعة لكتابة نص الرسالة'}
               </Text>
               <ArrowLeft size={16} color={colors.primary[700]} />
             </Pressable>
@@ -357,6 +355,8 @@ export function TemplateForm({ template, initialValues, onSaved, onCancel }: Tem
               <ArrowRight size={18} color={colors.primary[700]} />
               <Text style={localStyles.backButtonText}>السابق: اسم القالب</Text>
             </Pressable>
+
+            <Text style={localStyles.stepIndicator}>الخطوة ٢ من ٢: نص الرسالة والمتغيرات</Text>
 
             <Pressable
               accessibilityRole="button"
@@ -400,6 +400,8 @@ export function TemplateForm({ template, initialValues, onSaved, onCancel }: Tem
 
             <TextInput
               style={localStyles.bodyInput}
+              accessibilityLabel="نص الرسالة المخصص للقالب، حقل مطلوب"
+              accessibilityHint="اكتب الرسالة وأدخل المتغيرات من قائمة الأعمدة"
               value={body}
               onChangeText={(txt) => {
                 setBody(txt);
@@ -407,7 +409,7 @@ export function TemplateForm({ template, initialValues, onSaved, onCancel }: Tem
               }}
               onSelectionChange={(e) => setCursorPosition(e.nativeEvent.selection)}
               placeholder="اكتب نص الرسالة هنا... واضغط زر 'إضافة' من قائمة الأعمدة أدناه لإدراج البنود تلقائياً في موضع المؤشر."
-              placeholderTextColor={colors.neutral[400]}
+              placeholderTextColor={colors.neutral[600]}
               maxLength={MAX_BODY}
               multiline
               textAlignVertical="top"
@@ -444,6 +446,9 @@ export function TemplateForm({ template, initialValues, onSaved, onCancel }: Tem
               {extractedColumns.length > 0 ? (
                 <View style={localStyles.columnActionsRow}>
                   <Pressable
+                    accessibilityRole="button"
+                    accessibilityLabel="تحديد كل الأعمدة المستخرجة"
+                    style={localStyles.quickActionButton}
                     onPress={() =>
                       setExtractedColumns((prev) =>
                         prev.map((c) => ({ ...c, selected: true }))
@@ -454,6 +459,9 @@ export function TemplateForm({ template, initialValues, onSaved, onCancel }: Tem
                   </Pressable>
                   <Text style={localStyles.actionSeparator}>•</Text>
                   <Pressable
+                    accessibilityRole="button"
+                    accessibilityLabel="إلغاء تحديد كل الأعمدة المستخرجة"
+                    style={localStyles.quickActionButton}
                     onPress={() =>
                       setExtractedColumns((prev) =>
                         prev.map((c) => ({ ...c, selected: false }))
@@ -598,11 +606,12 @@ const localStyles = StyleSheet.create({
     fontFamily: fonts.regular,
     fontSize: 12,
     color: colors.primary[600],
-    textAlign: 'right',
+    flex: 1,
+    textAlign: 'center',
   },
   iconButton: {
-    width: 36,
-    height: 36,
+    width: 44,
+    height: 44,
     borderRadius: 18,
     backgroundColor: colors.neutral[100],
     alignItems: 'center',
@@ -612,8 +621,8 @@ const localStyles = StyleSheet.create({
     flexDirection: 'row-reverse',
     alignItems: 'center',
     gap: 6,
-    paddingHorizontal: 10,
-    paddingVertical: 6,
+    paddingHorizontal: 12,
+    minHeight: 44,
     borderRadius: 10,
     backgroundColor: colors.primary[50],
   },
@@ -741,7 +750,7 @@ const localStyles = StyleSheet.create({
   charCount: {
     fontFamily: fonts.regular,
     fontSize: 11,
-    color: colors.neutral[400],
+    color: colors.neutral[600],
   },
   bodyInput: {
     fontFamily: fonts.regular,
@@ -804,6 +813,11 @@ const localStyles = StyleSheet.create({
     fontSize: 12,
     color: colors.primary[600],
   },
+  quickActionButton: {
+    minHeight: 44,
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
   actionSeparator: {
     color: colors.neutral[300],
     fontSize: 10,
@@ -827,7 +841,10 @@ const localStyles = StyleSheet.create({
     backgroundColor: colors.primary[50] + '30',
   },
   checkboxTouch: {
-    padding: 2,
+    width: 44,
+    height: 44,
+    alignItems: 'center',
+    justifyContent: 'center',
   },
   columnInfo: {
     flex: 1,
@@ -851,7 +868,7 @@ const localStyles = StyleSheet.create({
     alignItems: 'center',
     gap: 4,
     paddingHorizontal: 12,
-    paddingVertical: 6,
+    minHeight: 44,
     borderRadius: 8,
     backgroundColor: colors.primary[100],
     borderWidth: 1,
@@ -882,7 +899,7 @@ const localStyles = StyleSheet.create({
     alignItems: 'center',
     gap: 6,
     paddingHorizontal: 12,
-    paddingVertical: 8,
+    minHeight: 44,
     borderRadius: 8,
     backgroundColor: colors.primary[50],
     borderWidth: 1,

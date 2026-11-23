@@ -5,7 +5,7 @@
 
 import * as SQLite from 'expo-sqlite';
 import { Platform } from 'react-native';
-import { supabase } from './supabase';
+import { isLocalApiConfigured, localApiUrl, supabase } from './supabase';
 import { resolveCampaignQueueStatus } from './campaignQueueStatus';
 import {
   CAMPAIGN_CLAIM_LEASE_MS,
@@ -114,6 +114,8 @@ class Database {
   private db: SQLite.SQLiteDatabase | null = null;
   private isInitialized = false;
   private initializationPromise: Promise<void> | null = null;
+  private syncPromise: Promise<{ success: boolean; message: string }> | null = null;
+  private syncUnavailableUntil = 0;
   private transactionTail: Promise<void> = Promise.resolve();
 
   private async withTransaction<T>(
@@ -165,8 +167,6 @@ class Database {
     await this.migrateLegacyTemplateIds();
     await this.recoverInterruptedCampaigns();
 
-    // Run initial sync after local queue recovery.
-    await this.syncWithSupabase();
   }
 
   private async createTables(): Promise<void> {
@@ -689,9 +689,49 @@ class Database {
   }
 
   async syncWithSupabase(): Promise<{ success: boolean; message: string }> {
+    if (this.syncPromise) return this.syncPromise;
+
+    if (Date.now() < this.syncUnavailableUntil) {
+      return {
+        success: false,
+        message: 'المزامنة مؤجلة حتى يتوفر الخادم.',
+      };
+    }
+
+    const sync = this.performSyncWithSupabase();
+    this.syncPromise = sync;
+    try {
+      return await sync;
+    } finally {
+      if (this.syncPromise === sync) this.syncPromise = null;
+    }
+  }
+
+  private async performSyncWithSupabase(): Promise<{ success: boolean; message: string }> {
     if (!this.db) await this.initialize();
 
     try {
+      if (isLocalApiConfigured && localApiUrl) {
+        const controller = new AbortController();
+        const timeout = setTimeout(() => controller.abort(), 1500);
+        let healthResponse: Response;
+        try {
+          healthResponse = await fetch(`${localApiUrl.replace(/\/$/, '')}/health`, {
+            signal: controller.signal,
+            headers: { apikey: 'local-postgres-api-key' },
+          });
+        } catch {
+          this.syncUnavailableUntil = Date.now() + 30_000;
+          return { success: false, message: 'المزامنة مؤجلة حتى يتوفر الخادم.' };
+        } finally {
+          clearTimeout(timeout);
+        }
+        if (!healthResponse.ok) {
+          this.syncUnavailableUntil = Date.now() + 30_000;
+          return { success: false, message: 'قاعدة البيانات المحلية غير متاحة الآن.' };
+        }
+      }
+
       // Get pending sync items
       const pendingItems = await this.db!.getAllAsync<SyncLog>(
         'SELECT * FROM sync_log WHERE synced = 0 ORDER BY timestamp ASC LIMIT 50'
@@ -724,13 +764,14 @@ class Database {
       await this.pullFromSupabase();
 
       if (pendingItems.length === 0) {
-        return { success: true, message: 'لا توجد عناصر معلقة؛ تم تحديث البيانات السحابية' };
+        return { success: true, message: 'لا توجد عناصر معلقة؛ تم تحديث البيانات من الخادم' };
       }
 
       return failedItems > 0
         ? { success: false, message: `تعذرت مزامنة ${failedItems} من ${pendingItems.length} عنصر` }
-        : { success: true, message: `تم مزامنة ${pendingItems.length} عنصر` };
+        : { success: true, message: `تمت مزامنة ${pendingItems.length} عنصر` };
     } catch (error) {
+      this.syncUnavailableUntil = Date.now() + 30_000;
       console.error('Sync failed:', error);
       return { success: false, message: 'فشلت المزامنة مع الخادم' };
     }

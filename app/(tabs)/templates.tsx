@@ -47,7 +47,12 @@ export default function TemplatesScreen() {
     }
   }, []);
 
-  useEffect(() => { load(); }, [load]);
+  useEffect(() => {
+    const timer = setTimeout(() => {
+      void load();
+    }, 0);
+    return () => clearTimeout(timer);
+  }, [load]);
 
   /** القوالب المصفّاة حسب التبويب المختار */
   const filtered = useMemo(() => {

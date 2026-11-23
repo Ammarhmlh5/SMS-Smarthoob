@@ -3,37 +3,68 @@
  * Allows user to import a document and map variables to columns
  */
 
-import { useState, useEffect, useCallback } from 'react';
-import { ActivityIndicator, Pressable, ScrollView, StyleSheet, Text, View } from 'react-native';
-import { FileSpreadsheet, Upload, Check, X, ArrowRight, RefreshCw, Phone, MessageSquareText } from 'lucide-react-native';
+import { useState, useEffect, useCallback, useRef } from 'react';
+import { ActivityIndicator, FlatList, Pressable, ScrollView, StyleSheet, Text, View } from 'react-native';
+import {
+  ArrowRight,
+  Check,
+  FileSpreadsheet,
+  MessageSquareText,
+  Phone,
+  RefreshCw,
+  Send,
+  Upload,
+  X,
+} from 'lucide-react-native';
 import { colors, fonts, spacing } from '@/constants/theme';
 import { 
   pickDocument, 
   parseDocumentFile,
+  pickedDocumentToUploadFile,
   suggestMapping, 
   type DocumentAnalysis,
 } from '@/lib/documentParser';
 import { parseDocument } from '@/lib/api';
 import { useAuth } from '@/lib/auth';
-import { isPreparedMessageColumn, type DocumentRecipientMapping } from '@/lib/documentRecipients';
+import {
+  isPreparedMessageColumn,
+  type DocumentMessageMode,
+  type DocumentRecipientMapping,
+} from '@/lib/documentRecipients';
+
+const DEFAULT_CONNECTION_REQUIRED_MESSAGE = 'اضبط خدمة الإرسال الافتراضية من الإعدادات أولاً.';
 
 type Props = {
   variables: string[];
   showRecipientMapping?: boolean;
+  recipientMessageMode?: DocumentMessageMode;
   sharedFile?: { uri: string; name: string } | null;
   onMapped: (
     mapping: Record<string, string>,
     document?: DocumentAnalysis,
     recipientMapping?: DocumentRecipientMapping,
   ) => void;
+  onDirectSend?: (
+    mapping: Record<string, string>,
+    document: DocumentAnalysis,
+    recipientMapping: DocumentRecipientMapping,
+  ) => Promise<void>;
+  canSendDirectly?: boolean;
+  directSendProgress?: { sent: number; failed: number; processed: number; total: number };
+  onOpenSettings?: () => void;
   onCancel: () => void;
 };
 
 export function DocumentImportModal({
   variables,
   showRecipientMapping = false,
+  recipientMessageMode,
   sharedFile,
   onMapped,
+  onDirectSend,
+  canSendDirectly = false,
+  directSendProgress,
+  onOpenSettings,
   onCancel,
 }: Props) {
   const { session } = useAuth();
@@ -44,6 +75,9 @@ export function DocumentImportModal({
   const [manualMappings, setManualMappings] = useState<Record<string, string>>({});
   const [phoneColumn, setPhoneColumn] = useState('');
   const [messageColumn, setMessageColumn] = useState('');
+  const [submitting, setSubmitting] = useState(false);
+  const submittingRef = useRef(false);
+  const directRecordsListRef = useRef<FlatList<Record<string, string>> | null>(null);
 
   const processDocument = useCallback(async (result: { uri: string; name: string }) => {
     setLoading(true);
@@ -71,21 +105,7 @@ export function DocumentImportModal({
         transformedDoc = await parseDocumentFile(result.uri, result.name);
       } else {
         const userId = session?.user?.id || 'default';
-        let uploadFile: any;
-        if (typeof window !== 'undefined' && typeof File !== 'undefined' && (result as any).file instanceof File) {
-          uploadFile = (result as any).file;
-        } else if (result.uri.startsWith('data:') && typeof window !== 'undefined' && typeof File !== 'undefined') {
-          const response = await fetch(result.uri);
-          const blob = await response.blob();
-          uploadFile = new File([blob], result.name, { type: blob.type || mimeType });
-        } else {
-          // Native FormData payload
-          uploadFile = {
-            uri: result.uri,
-            name: result.name,
-            type: mimeType,
-          };
-        }
+        const uploadFile = await pickedDocumentToUploadFile(result, mimeType);
 
         const parsed = await parseDocument(uploadFile, userId);
         const records = parsed.records;
@@ -131,7 +151,8 @@ export function DocumentImportModal({
           transformedDoc.columns.find((column) => /هاتف|جوال|phone|mobile|واتساب/i.test(column)) ||
           '',
         );
-        setMessageColumn(transformedDoc.columns.find(isPreparedMessageColumn) || '');
+        const preparedMessageColumn = transformedDoc.columns.find(isPreparedMessageColumn) || '';
+        setMessageColumn(preparedMessageColumn);
         setDocument(transformedDoc);
         setStep('mapping');
       }
@@ -140,11 +161,19 @@ export function DocumentImportModal({
     } finally {
       setLoading(false);
     }
-  }, [session?.user?.id, variables]);
+  }, [session, variables]);
 
   useEffect(() => {
-    if (sharedFile) void processDocument(sharedFile);
+    if (!sharedFile) return;
+    const timer = setTimeout(() => {
+      void processDocument(sharedFile);
+    }, 0);
+    return () => clearTimeout(timer);
   }, [processDocument, sharedFile]);
+
+  useEffect(() => {
+    directRecordsListRef.current?.scrollToOffset({ offset: 0, animated: false });
+  }, [document]);
 
   const handlePickDocument = async () => {
     setLoading(true);
@@ -167,19 +196,31 @@ export function DocumentImportModal({
     setError(null);
   };
 
-  const handleConfirm = () => {
+  const getValidatedMappings = () => {
+    if (!document) {
+      setError('اختر مستنداً للمتابعة.');
+      return null;
+    }
+
     const hasPreparedMessage = document?.columns.some(isPreparedMessageColumn) ?? false;
+    const usesPreparedMessage = recipientMessageMode
+      ? recipientMessageMode === 'prepared'
+      : hasPreparedMessage;
     if (showRecipientMapping && !phoneColumn) {
       setError('حدد عمود رقم الهاتف للمتابعة.');
-      return;
+      return null;
     }
-    if (showRecipientMapping && hasPreparedMessage && !messageColumn) {
+    if (showRecipientMapping && usesPreparedMessage && !messageColumn) {
       setError('حدد عمود نص الرسالة الجاهزة للمتابعة.');
-      return;
+      return null;
     }
-    if (showRecipientMapping && !hasPreparedMessage && variables.some((variable) => !manualMappings[variable])) {
+    if (showRecipientMapping && usesPreparedMessage && phoneColumn === messageColumn) {
+      setError('اختر عموداً مختلفاً لرقم الهاتف ونص الرسالة.');
+      return null;
+    }
+    if (showRecipientMapping && !usesPreparedMessage && variables.some((variable) => !manualMappings[variable])) {
       setError('اربط جميع متغيرات القالب بأعمدة المستند للمتابعة.');
-      return;
+      return null;
     }
 
     const validMappings: Record<string, string> = {};
@@ -188,14 +229,51 @@ export function DocumentImportModal({
         validMappings[variable] = column;
       }
     }
-    onMapped(
+    setError(null);
+    return {
       validMappings,
-      document || undefined,
-      showRecipientMapping
-        ? { phoneColumn, messageColumn: hasPreparedMessage ? messageColumn : undefined }
+      recipientMapping: showRecipientMapping
+        ? {
+            phoneColumn,
+            messageColumn: usesPreparedMessage ? messageColumn : undefined,
+            ...(recipientMessageMode ? { messageMode: recipientMessageMode } : {}),
+          }
         : undefined,
+    };
+  };
+
+  const handleConfirm = () => {
+    const mappings = getValidatedMappings();
+    if (!mappings || !document) return;
+    onMapped(
+      mappings.validMappings,
+      document,
+      mappings.recipientMapping,
     );
     setStep('done');
+  };
+
+  const handleDirectSend = async () => {
+    if (!onDirectSend || !document || submittingRef.current) return;
+    if (!canSendDirectly) {
+      setError(DEFAULT_CONNECTION_REQUIRED_MESSAGE);
+      return;
+    }
+
+    const mappings = getValidatedMappings();
+    if (!mappings?.recipientMapping) return;
+
+    submittingRef.current = true;
+    setSubmitting(true);
+    try {
+      await onDirectSend(mappings.validMappings, document, mappings.recipientMapping);
+      setStep('done');
+    } catch (sendError) {
+      setError(sendError instanceof Error ? sendError.message : 'تعذر تنفيذ الإرسال المباشر.');
+    } finally {
+      submittingRef.current = false;
+      setSubmitting(false);
+    }
   };
 
   const renderColumnSelector = (
@@ -205,6 +283,7 @@ export function DocumentImportModal({
   ) => (
     <View style={styles.columnPicker}>
       <ScrollView
+        key={`${accessibilityLabel}-${document?.fileName ?? ''}`}
         horizontal
         showsHorizontalScrollIndicator={false}
         contentContainerStyle={styles.columnPickerContent}
@@ -215,6 +294,7 @@ export function DocumentImportModal({
             accessibilityRole="button"
             accessibilityLabel={`${accessibilityLabel}: ${column}`}
             accessibilityState={{ selected: selectedColumn === column }}
+            disabled={submitting}
             onPress={() => {
               onSelect(column);
               setError(null);
@@ -234,7 +314,7 @@ export function DocumentImportModal({
               {column}
             </Text>
           </Pressable>
-        ))}
+          ))}
       </ScrollView>
     </View>
   );
@@ -281,14 +361,18 @@ export function DocumentImportModal({
     if (!document) return null;
 
     const sampleRecords = document.records?.slice(0, 2) ?? [];
+    const allRecords = document.records ?? [];
     const hasPreparedMessage = document.columns.some(isPreparedMessageColumn);
+    const usesPreparedMessage = recipientMessageMode
+      ? recipientMessageMode === 'prepared'
+      : hasPreparedMessage;
     const hasNoVariableMappings = Object.values(manualMappings).every((column) => !column);
     const variableMappings = (
       <View style={styles.variablesSection}>
         <Text style={styles.sectionTitle}>أعمدة متغيرات القالب</Text>
         <Text style={styles.sectionHint}>
           {showRecipientMapping
-            ? 'لا يحتوي المستند على رسائل جاهزة؛ ستُنشأ الرسائل من القالب المختار'
+            ? 'ستُنشأ رسالة لكل صف باستخدام القالب المختار وأعمدة المستند'
             : 'حدد العمود المناسب لكل متغير من ملف البيانات'}
         </Text>
         {variables.map((variable) => (
@@ -311,6 +395,9 @@ export function DocumentImportModal({
                 contentContainerStyle={styles.columnPickerContent}
               >
                 <Pressable
+                  accessibilityRole="button"
+                  accessibilityLabel={`إلغاء ربط ${variable}`}
+                  accessibilityState={{ selected: !manualMappings[variable] }}
                   onPress={() => handleMappingChange(variable, '')}
                   style={({ pressed }) => [
                     styles.columnOption,
@@ -328,6 +415,9 @@ export function DocumentImportModal({
                 {document.columns.map((column) => (
                   <Pressable
                     key={column}
+                    accessibilityRole="button"
+                    accessibilityLabel={`ربط ${variable} بعمود ${column}`}
+                    accessibilityState={{ selected: manualMappings[variable] === column }}
                     onPress={() => handleMappingChange(variable, column)}
                     style={({ pressed }) => [
                       styles.columnOption,
@@ -350,44 +440,179 @@ export function DocumentImportModal({
       </View>
     );
 
+    const documentInfo = (
+      <View style={[styles.docInfo, onDirectSend && styles.directDocInfo]}>
+        <FileSpreadsheet size={20} color={colors.primary[600]} strokeWidth={2} />
+        <Text style={styles.docName} numberOfLines={1}>{document.fileName}</Text>
+        <View style={styles.docStats}>
+          <Text style={styles.docStatText}>{document.columns.length} عمود</Text>
+          <Text style={styles.docStatDot}>•</Text>
+          <Text style={styles.docStatText}>{document.rowCount} صف</Text>
+        </View>
+      </View>
+    );
+
+    const mappingFields = showRecipientMapping ? (
+      <View style={[styles.requiredMappings, onDirectSend && styles.directRequiredMappings]}>
+        <View style={[styles.requiredMapping, onDirectSend && styles.directRequiredMapping]}>
+          <View style={styles.requiredMappingHeading}>
+            <Phone size={16} color={colors.primary[700]} strokeWidth={2} />
+            <Text style={styles.sectionTitle}>عمود رقم الهاتف</Text>
+          </View>
+          {!onDirectSend ? (
+            <Text style={styles.sectionHint}>اختر العمود الذي يحتوي على أرقام المستلمين</Text>
+          ) : null}
+          {renderColumnSelector(
+            phoneColumn,
+            setPhoneColumn,
+            'رقم الهاتف',
+          )}
+        </View>
+
+        {usesPreparedMessage ? (
+          <View style={[styles.requiredMapping, onDirectSend && styles.directRequiredMapping]}>
+            <View style={styles.requiredMappingHeading}>
+              <MessageSquareText size={16} color={colors.primary[700]} strokeWidth={2} />
+              <Text style={styles.sectionTitle}>عمود نص الرسالة الجاهزة</Text>
+            </View>
+            {!onDirectSend ? (
+              <Text style={styles.sectionHint}>سيتم استخدام نص الرسالة من كل صف في الملف</Text>
+            ) : null}
+            {renderColumnSelector(
+              messageColumn,
+              setMessageColumn,
+              'نص الرسالة',
+            )}
+          </View>
+        ) : variables.length > 0 ? (
+          variableMappings
+        ) : null}
+      </View>
+    ) : variables.length > 0 ? variableMappings : null;
+
+    if (onDirectSend) {
+      return (
+        <View style={styles.directMappingLayout}>
+          <View style={styles.directListHeader}>
+            {documentInfo}
+            {mappingFields}
+            <View style={styles.previewSection}>
+              <Text style={styles.sectionTitle}>
+                معاينة البيانات · الإرسال يشمل جميع الصفوف ({document.rowCount})
+              </Text>
+            </View>
+          </View>
+          <FlatList
+            ref={directRecordsListRef}
+            data={allRecords}
+            keyExtractor={(_, index) => `${document.fileName}-${index}`}
+            style={styles.directRecordsList}
+            contentContainerStyle={styles.directRecordsContent}
+            keyboardShouldPersistTaps="handled"
+            initialNumToRender={8}
+            maxToRenderPerBatch={10}
+            windowSize={5}
+            renderItem={({ item, index }) => (
+              <View style={styles.recordCard}>
+                <Text style={styles.recordNumber}>صف {index + 1}</Text>
+                <View style={styles.recordFields}>
+                  {document.columns.map((column) => {
+                    const selectedColumn = column === phoneColumn || column === messageColumn;
+                    return (
+                      <View
+                        key={column}
+                        style={[
+                          styles.recordField,
+                          selectedColumn && styles.recordFieldSelected,
+                        ]}
+                      >
+                        <Text style={styles.recordFieldLabel}>{column}</Text>
+                        <Text
+                          style={[
+                            styles.recordFieldValue,
+                            column === phoneColumn && styles.phoneRecordValue,
+                          ]}
+                        >
+                          {item[column] || '—'}
+                        </Text>
+                      </View>
+                    );
+                  })}
+                </View>
+              </View>
+            )}
+            ListEmptyComponent={
+              <Text style={styles.emptyPreview}>لا يحتوي المستند على صفوف لإرسالها.</Text>
+            }
+          />
+
+          <View style={styles.directFooter}>
+            {error ? (
+              <View style={styles.errorBox}>
+                <Text style={styles.errorText}>{error}</Text>
+                {error === DEFAULT_CONNECTION_REQUIRED_MESSAGE && onOpenSettings ? (
+                  <Pressable
+                    accessibilityRole="button"
+                    onPress={onOpenSettings}
+                    disabled={submitting}
+                    style={styles.gatewaySettingsButton}
+                  >
+                    <Text style={styles.gatewaySettingsButtonText}>فتح الإعدادات</Text>
+                  </Pressable>
+                ) : null}
+              </View>
+            ) : null}
+
+            <View style={styles.directButtonRow}>
+              <Pressable
+                accessibilityRole="button"
+                onPress={() => setStep('pick')}
+                disabled={submitting}
+                style={({ pressed }) => [
+                  styles.secondaryButton,
+                  styles.directActionButton,
+                  pressed && styles.pressed,
+                  submitting && styles.disabled,
+                ]}
+              >
+                <RefreshCw size={16} color={colors.primary[700]} strokeWidth={2} />
+                <Text style={styles.secondaryButtonText}>ملف آخر</Text>
+              </Pressable>
+
+              <Pressable
+                accessibilityRole="button"
+                accessibilityLabel={`إرسال مباشر إلى ${document.rowCount} مستلم`}
+                onPress={() => void handleDirectSend()}
+                disabled={submitting || allRecords.length === 0}
+                style={({ pressed }) => [
+                  styles.primaryButton,
+                  styles.directActionButton,
+                  pressed && styles.pressed,
+                  (submitting || allRecords.length === 0) && styles.disabled,
+                ]}
+              >
+                {submitting ? (
+                  <ActivityIndicator color={colors.neutral[0]} />
+                ) : (
+                  <Send size={18} color={colors.neutral[0]} />
+                )}
+                <Text style={styles.directButtonText}>
+                  {submitting
+                    ? `جاري الإرسال ${directSendProgress?.processed ?? 0}/${directSendProgress?.total ?? document.rowCount}`
+                    : `إرسال مباشر (${document.rowCount})`}
+                </Text>
+              </Pressable>
+            </View>
+          </View>
+        </View>
+      );
+    }
+
     return (
       <ScrollView style={styles.mappingScroll} showsVerticalScrollIndicator={false}>
         <View style={styles.stepContent}>
-          <View style={styles.docInfo}>
-            <FileSpreadsheet size={20} color={colors.primary[600]} strokeWidth={2} />
-            <Text style={styles.docName} numberOfLines={1}>{document.fileName}</Text>
-            <View style={styles.docStats}>
-              <Text style={styles.docStatText}>{document.columns.length} عمود</Text>
-              <Text style={styles.docStatDot}>•</Text>
-              <Text style={styles.docStatText}>{document.rowCount} صف</Text>
-            </View>
-          </View>
-
-          {showRecipientMapping ? (
-          <View style={styles.requiredMappings}>
-            <View style={styles.requiredMapping}>
-              <View style={styles.requiredMappingHeading}>
-                <Phone size={16} color={colors.primary[700]} strokeWidth={2} />
-                <Text style={styles.sectionTitle}>عمود رقم الهاتف</Text>
-              </View>
-              <Text style={styles.sectionHint}>اختر العمود الذي يحتوي على أرقام المستلمين</Text>
-              {renderColumnSelector(phoneColumn, setPhoneColumn, 'رقم الهاتف')}
-            </View>
-
-            {hasPreparedMessage ? (
-              <View style={styles.requiredMapping}>
-                <View style={styles.requiredMappingHeading}>
-                  <MessageSquareText size={16} color={colors.primary[700]} strokeWidth={2} />
-                  <Text style={styles.sectionTitle}>عمود نص الرسالة الجاهزة</Text>
-                </View>
-                <Text style={styles.sectionHint}>سيتم استخدام نص الرسالة من كل صف في الملف</Text>
-                {renderColumnSelector(messageColumn, setMessageColumn, 'نص الرسالة')}
-              </View>
-            ) : variables.length > 0 ? (
-              variableMappings
-            ) : null}
-          </View>
-          ) : variables.length > 0 ? variableMappings : null}
+          {documentInfo}
+          {mappingFields}
 
           <View style={styles.previewSection}>
             <Text style={styles.sectionTitle}>معاينة البيانات</Text>
@@ -421,7 +646,9 @@ export function DocumentImportModal({
 
           <View style={styles.buttonRow}>
             <Pressable
+              accessibilityRole="button"
               onPress={() => setStep('pick')}
+              disabled={submitting}
               style={({ pressed }) => [styles.secondaryButton, pressed && styles.pressed]}
             >
               <RefreshCw size={16} color={colors.primary[700]} strokeWidth={2} />
@@ -429,20 +656,21 @@ export function DocumentImportModal({
             </Pressable>
 
             <Pressable
+              accessibilityRole="button"
               onPress={handleConfirm}
-              disabled={
-                !showRecipientMapping &&
-                variables.length > 0 &&
-                hasNoVariableMappings &&
-                !hasPreparedMessage
-              }
+              disabled={submitting ||
+                (!showRecipientMapping &&
+                  variables.length > 0 &&
+                  hasNoVariableMappings &&
+                  !hasPreparedMessage)}
               style={({ pressed }) => [
                 styles.primaryButton,
                 pressed && styles.pressed,
-                !showRecipientMapping &&
-                  variables.length > 0 &&
-                  hasNoVariableMappings &&
-                  !hasPreparedMessage &&
+                (submitting ||
+                  (!showRecipientMapping &&
+                    variables.length > 0 &&
+                    hasNoVariableMappings &&
+                    !hasPreparedMessage)) &&
                   styles.disabled,
               ]}
             >
@@ -456,13 +684,13 @@ export function DocumentImportModal({
   };
 
   return (
-    <View style={styles.container}>
+    <View style={[styles.container, onDirectSend && styles.directContainer]}>
       <View style={styles.header}>
         <Text style={styles.headerTitle}>
           {step === 'pick' ? 'استيراد بيانات' : 
-           step === 'mapping' ? 'ربط المتغيرات' : 'تم بنجاح'}
+           step === 'mapping' ? (onDirectSend ? 'معاينة وإرسال الرسائل' : 'ربط المتغيرات') : 'تم بنجاح'}
         </Text>
-        <Pressable onPress={onCancel} style={styles.closeButton}>
+        <Pressable onPress={onCancel} disabled={submitting} style={styles.closeButton}>
           <X size={20} color={colors.neutral[500]} strokeWidth={2} />
         </Pressable>
       </View>
@@ -474,8 +702,14 @@ export function DocumentImportModal({
           <View style={styles.successIcon}>
             <Check size={40} color={colors.success[600]} strokeWidth={3} />
           </View>
-          <Text style={styles.successText}>تم ربط المتغيرات بنجاح</Text>
-          <Pressable onPress={onCancel} style={({ pressed }) => [styles.primaryButton, pressed && styles.pressed]}>
+          <Text style={styles.successText}>
+            {onDirectSend ? 'اكتمل الإرسال المباشر' : 'تم ربط المتغيرات بنجاح'}
+          </Text>
+          <Pressable
+            accessibilityRole="button"
+            onPress={onCancel}
+            style={({ pressed }) => [styles.primaryButton, pressed && styles.pressed]}
+          >
             <Text style={styles.primaryButtonText}>تم</Text>
           </Pressable>
         </View>
@@ -492,6 +726,11 @@ const styles = StyleSheet.create({
     width: '100%',
     maxWidth: 400,
     overflow: 'hidden',
+  },
+  directContainer: {
+    height: '100%',
+    maxHeight: '100%',
+    maxWidth: 960,
   },
   header: {
     flexDirection: 'row-reverse',
@@ -600,6 +839,98 @@ const styles = StyleSheet.create({
   mappingScroll: {
     maxHeight: 500,
   },
+  directMappingLayout: {
+    flex: 1,
+    flexBasis: 0,
+    flexShrink: 1,
+    minHeight: 0,
+    overflow: 'hidden',
+  },
+  directRecordsList: {
+    flex: 1,
+    flexBasis: 0,
+    flexShrink: 1,
+    minHeight: 100,
+  },
+  directRecordsContent: {
+    paddingHorizontal: spacing.md,
+    paddingBottom: spacing.sm,
+    gap: spacing.xs,
+  },
+  directListHeader: {
+    flexShrink: 0,
+    gap: spacing.xs,
+    paddingHorizontal: spacing.md,
+    paddingTop: spacing.sm,
+    paddingBottom: spacing.xs,
+  },
+  directDocInfo: {
+    paddingVertical: spacing.xs,
+  },
+  directFooter: {
+    flexShrink: 0,
+    gap: spacing.xs,
+    paddingHorizontal: spacing.md,
+    paddingBottom: spacing.sm,
+  },
+  recordCard: {
+    gap: spacing.xs,
+    borderWidth: 1,
+    borderColor: colors.neutral[200],
+    borderRadius: 12,
+    backgroundColor: colors.neutral[0],
+    padding: spacing.sm,
+  },
+  recordNumber: {
+    fontFamily: fonts.semibold,
+    fontSize: 12,
+    color: colors.neutral[500],
+    textAlign: 'right',
+  },
+  recordFields: {
+    flexDirection: 'row-reverse',
+    flexWrap: 'wrap',
+    gap: spacing.xs,
+  },
+  recordField: {
+    flexBasis: '48%',
+    flexGrow: 1,
+    minWidth: 120,
+    gap: 3,
+    borderWidth: 1,
+    borderColor: colors.neutral[100],
+    borderRadius: 8,
+    backgroundColor: colors.neutral[50],
+    padding: spacing.xs,
+  },
+  recordFieldSelected: {
+    borderColor: colors.primary[200],
+    backgroundColor: colors.primary[50],
+  },
+  recordFieldLabel: {
+    fontFamily: fonts.semibold,
+    fontSize: 11,
+    color: colors.primary[700],
+    textAlign: 'right',
+  },
+  recordFieldValue: {
+    fontFamily: fonts.regular,
+    fontSize: 13,
+    lineHeight: 19,
+    color: colors.neutral[800],
+    textAlign: 'right',
+  },
+  phoneRecordValue: {
+    writingDirection: 'ltr',
+    textAlign: 'left',
+  },
+  emptyPreview: {
+    padding: spacing.md,
+    fontFamily: fonts.regular,
+    fontSize: 13,
+    color: colors.neutral[600],
+    textAlign: 'center',
+  },
   docInfo: {
     flexDirection: 'row-reverse',
     alignItems: 'center',
@@ -636,6 +967,19 @@ const styles = StyleSheet.create({
   requiredMappings: {
     width: '100%',
     gap: spacing.md,
+  },
+  directRequiredMappings: {
+    flexDirection: 'row-reverse',
+    flexWrap: 'wrap',
+    gap: spacing.sm,
+  },
+  directRequiredMapping: {
+    width: 'auto',
+    flexBasis: 300,
+    flexGrow: 1,
+    minWidth: 250,
+    flexDirection: 'row-reverse',
+    alignItems: 'center',
   },
   requiredMapping: {
     width: '100%',
@@ -716,6 +1060,32 @@ const styles = StyleSheet.create({
   previewSection: {
     width: '100%',
     gap: spacing.sm,
+  },
+  directButtonRow: {
+    flexDirection: 'row-reverse',
+    gap: spacing.sm,
+    paddingVertical: spacing.xs,
+  },
+  directActionButton: {
+    flex: 1,
+    height: 40,
+    minWidth: 0,
+  },
+  directButtonText: {
+    flexShrink: 1,
+    fontFamily: fonts.bold,
+    fontSize: 13,
+    color: colors.neutral[0],
+    textAlign: 'center',
+  },
+  gatewaySettingsButton: {
+    alignSelf: 'flex-end',
+    paddingVertical: spacing.xs,
+  },
+  gatewaySettingsButtonText: {
+    fontFamily: fonts.semibold,
+    fontSize: 13,
+    color: colors.primary[700],
   },
   previewTable: {
     borderRadius: 12,

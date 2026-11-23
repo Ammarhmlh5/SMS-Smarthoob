@@ -1,4 +1,4 @@
-import { supabase } from '@/lib/supabase';
+import { isLocalApiConfigured, supabase } from '@/lib/supabase';
 import { getConnectionTestError } from './connectionTestError';
 
 export type GatewayConnection = {
@@ -149,42 +149,56 @@ async function ensurePreferences(userId: string): Promise<PreferenceRow> {
 }
 
 export async function fetchGatewaySettings(): Promise<GatewaySettings> {
-  const userId = await requireUserId();
-  const [preferences, connectionsResult] = await Promise.all([
-    ensurePreferences(userId),
-    supabase
-      .from('gateway_connections')
-      .select(CONNECTION_COLUMNS)
-      .eq('user_id', userId)
-      .order('created_at', { ascending: true }),
-  ]);
-  if (connectionsResult.error) throw connectionsResult.error;
+  try {
+    const userId = await requireUserId();
+    const [preferences, connectionsResult] = await Promise.all([
+      ensurePreferences(userId),
+      supabase
+        .from('gateway_connections')
+        .select(CONNECTION_COLUMNS)
+        .eq('user_id', userId)
+        .order('created_at', { ascending: true }),
+    ]);
+    if (connectionsResult.error) throw connectionsResult.error;
 
-  const connections = connectionsResult.data ?? [];
-  const defaultConnectionId = preferences.default_connection_ready
-    ? connections.some((connection) => connection.id === preferences.default_connection_id)
-      ? preferences.default_connection_id
-      : connections[0]?.id ?? null
-    : connections[0]?.id ?? null;
-  if (
-    preferences.default_connection_ready &&
-    defaultConnectionId !== preferences.default_connection_id
-  ) {
-    const { error } = await supabase
-      .from('gateway_settings')
-      .update({ default_connection_id: defaultConnectionId })
-      .eq('user_id', userId);
-    if (error) throw error;
+    const connections = connectionsResult.data ?? [];
+    const defaultConnectionId = preferences.default_connection_ready
+      ? connections.some((connection) => connection.id === preferences.default_connection_id)
+        ? preferences.default_connection_id
+        : connections[0]?.id ?? null
+      : connections[0]?.id ?? null;
+    if (
+      preferences.default_connection_ready &&
+      defaultConnectionId !== preferences.default_connection_id
+    ) {
+      const { error } = await supabase
+        .from('gateway_settings')
+        .update({ default_connection_id: defaultConnectionId })
+        .eq('user_id', userId);
+      if (error) throw error;
+    }
+
+    return {
+      connections,
+      default_connection_id: defaultConnectionId,
+      default_connection_ready: preferences.default_connection_ready,
+      batch_size: preferences.batch_size,
+      max_retries: preferences.max_retries,
+      updated_at: preferences.updated_at,
+    };
+  } catch (error) {
+    if (isLocalApiConfigured) {
+      return {
+        connections: [],
+        default_connection_id: null,
+        default_connection_ready: false,
+        batch_size: 50,
+        max_retries: 3,
+        updated_at: new Date(0).toISOString(),
+      };
+    }
+    throw error;
   }
-
-  return {
-    connections,
-    default_connection_id: defaultConnectionId,
-    default_connection_ready: preferences.default_connection_ready,
-    batch_size: preferences.batch_size,
-    max_retries: preferences.max_retries,
-    updated_at: preferences.updated_at,
-  };
 }
 
 export async function getGatewayConnection(id: string): Promise<GatewayConnection> {
