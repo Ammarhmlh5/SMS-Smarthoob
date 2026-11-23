@@ -5,7 +5,36 @@
 
 import * as FileSystem from 'expo-file-system/legacy';
 import * as DocumentPicker from 'expo-document-picker';
+import { Platform } from 'react-native';
+import bidiFactory from 'bidi-js';
 import { parseCSV } from '@/lib/csv';
+
+const bidi = bidiFactory();
+
+const ARABIC_PRESENTATION_FORM =
+  /[\uFB50-\uFDFF\uFE70-\uFEFF]/;
+
+export function normalizeArabicDocumentText(value: string): string {
+  if (!value) return '';
+
+  const hadArabicPresentationForms = ARABIC_PRESENTATION_FORM.test(value);
+  let normalized = value.normalize('NFKC');
+
+  // PDF engines can extract Arabic in visual/presentation-form order.
+  // Restore logical text order before bidi-js calculates the display levels.
+  if (hadArabicPresentationForms) {
+    normalized = [...normalized].reverse().join('');
+  }
+
+  if (/[\u0600-\u06FF]/.test(normalized)) {
+    const embeddingLevels = bidi.getEmbeddingLevels(normalized, 'rtl');
+    if (embeddingLevels.levels.length > 0) {
+      return normalized.normalize('NFC').trim();
+    }
+  }
+
+  return normalized.normalize('NFC').trim();
+}
 
 export type ColumnInfo = {
   name: string;
@@ -34,7 +63,14 @@ export type VariableMapping = {
 // Document Picker
 // =====================
 
-export async function pickDocument(): Promise<{ uri: string; name: string } | null> {
+export type PickedDocument = {
+  uri: string;
+  name: string;
+  mimeType?: string;
+  file?: File;
+};
+
+export async function pickDocument(): Promise<PickedDocument | null> {
   try {
     // Try native picker first - supports CSV, Excel, and PDF
     const result = await DocumentPicker.getDocumentAsync({
@@ -67,9 +103,15 @@ export async function pickDocument(): Promise<{ uri: string; name: string } | nu
       throw new Error('لم يتم الحصول على رابط الملف');
     }
     
+    const browserFile = typeof window !== 'undefined'
+      ? (asset as { file?: File }).file
+      : undefined;
+
     return {
       uri: asset.uri,
       name: asset.name || 'document',
+      mimeType: asset.mimeType,
+      file: browserFile instanceof File ? browserFile : undefined,
     };
   } catch (error) {
     console.error('Error picking document:', error);
@@ -82,7 +124,7 @@ export async function pickDocument(): Promise<{ uri: string; name: string } | nu
 }
 
 // Web fallback using browser file input
-async function pickDocumentWeb(): Promise<{ uri: string; name: string } | null> {
+async function pickDocumentWeb(): Promise<PickedDocument | null> {
   return new Promise((resolve) => {
     const input = document.createElement('input');
     input.type = 'file';
@@ -96,6 +138,8 @@ async function pickDocumentWeb(): Promise<{ uri: string; name: string } | null> 
           resolve({
             uri: reader.result as string,
             name: file.name,
+            mimeType: file.type,
+            file,
           });
         };
         reader.onerror = () => {
@@ -110,6 +154,34 @@ async function pickDocumentWeb(): Promise<{ uri: string; name: string } | null> 
     input.onerror = () => resolve(null);
     input.click();
   });
+}
+
+export async function pickedDocumentToUploadFile(
+  document: PickedDocument,
+  fallbackMimeType: string,
+): Promise<File | { uri: string; name: string; type: string }> {
+  if (typeof window !== 'undefined' && typeof File !== 'undefined') {
+    if (document.file instanceof File) {
+      return document.file;
+    }
+
+    if (/^(data|blob|https?):/.test(document.uri)) {
+      const response = await fetch(document.uri);
+      if (!response.ok) {
+        throw new Error('تعذر قراءة الملف المختار.');
+      }
+      const blob = await response.blob();
+      return new File([blob], document.name, {
+        type: document.mimeType || blob.type || fallbackMimeType,
+      });
+    }
+  }
+
+  return {
+    uri: document.uri,
+    name: document.name,
+    type: document.mimeType || fallbackMimeType,
+  };
 }
 
 // =====================
@@ -213,17 +285,11 @@ export async function parseDocumentFile(uri: string, fileName: string): Promise<
     console.log('parseDocumentFile called with:', uri, fileName);
     
     let content: string;
-    
-    // Check if it's a data URL (web) or file URI (native)
-    if (uri.startsWith('data:')) {
-      // Web: Extract content from data URL
-      const base64 = uri.split(',')[1];
-      if (!base64) throw new Error('محتوى الملف المختار فارغ.');
-      const binary = atob(base64);
-      const bytes = Uint8Array.from(binary, (character) => character.charCodeAt(0));
-      content = new TextDecoder('utf-8').decode(bytes);
+    if (Platform.OS === 'web') {
+      const response = await fetch(uri);
+      if (!response.ok) throw new Error('تعذر قراءة الملف المختار.');
+      content = await response.text();
     } else {
-      // Native: Read from file system
       content = await FileSystem.readAsStringAsync(uri);
       console.log('Read file from filesystem, length:', content.length);
     }

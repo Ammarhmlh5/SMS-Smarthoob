@@ -257,6 +257,51 @@ async function runTests() {
       readyDocumentRecipients.length === 2,
     'المستندات ذات الرسائل الجاهزة تُجهز محلياً دون قالب أو استدعاء خادم',
   );
+  const smsTxtRecipients = buildDocumentRecipients({
+    columns: ['MobileNo', 'sms_txt'],
+    records: [{ MobileNo: '+966500000011', sms_txt: 'رسالة جاهزة من sms_txt' }],
+    rowCount: 1,
+    mapping: {},
+    recipientMapping: { phoneColumn: 'MobileNo', messageMode: 'prepared' },
+  });
+  assert(
+    smsTxtRecipients[0].message === 'رسالة جاهزة من sms_txt',
+    'اكتشاف عمود sms_txt كنص رسالة جاهزة',
+  );
+  const explicitlyPreparedRecipients = buildDocumentRecipients({
+    columns: ['phone', 'message', 'name'],
+    records: [{ phone: '+966500000009', message: 'النص الجاهز', name: 'سارة' }],
+    rowCount: 1,
+    mapping: { الاسم: 'name' },
+    recipientMapping: {
+      phoneColumn: 'phone',
+      messageColumn: 'message',
+      messageMode: 'prepared',
+    },
+    templateBody: 'رسالة بديلة {{الاسم}}',
+    renderMessage: (body, data) => body.replace('{{الاسم}}', data.الاسم),
+  });
+  assert(
+    explicitlyPreparedRecipients[0].message === 'النص الجاهز',
+    'خيار الرسائل الجاهزة يستخدم نص المستند حتى عند وجود قالب محدد',
+  );
+  const explicitlyTemplatedRecipients = buildDocumentRecipients({
+    columns: ['phone', 'message', 'name'],
+    records: [{ phone: '+966500000010', message: 'نص جاهز غير مستخدم', name: 'أحمد' }],
+    rowCount: 1,
+    mapping: { الاسم: 'name' },
+    recipientMapping: {
+      phoneColumn: 'phone',
+      messageColumn: 'message',
+      messageMode: 'template',
+    },
+    templateBody: 'مرحباً {{الاسم}}',
+    renderMessage: (body, data) => body.replace('{{الاسم}}', data.الاسم),
+  });
+  assert(
+    explicitlyTemplatedRecipients[0].message === 'مرحباً أحمد',
+    'خيار حسب القالب يتجاهل عمود الرسالة الجاهزة ويستخدم القالب المختار',
+  );
   const explicitlyMappedDocumentRecipients = buildDocumentRecipients({
     columns: ['رقم التواصل', 'المحتوى', 'رقم الهاتف', 'نص الرسالة'],
     records: [{
@@ -273,6 +318,27 @@ async function runTests() {
     explicitlyMappedDocumentRecipients[0].phone === '+966500000008' &&
       explicitlyMappedDocumentRecipients[0].message === 'رسالة من العمود المختار',
     'استخدام عمودي الهاتف والرسالة اللذين اختارهما المستخدم',
+  );
+  let reusedPreparedColumnRejected = false;
+  try {
+    buildDocumentRecipients({
+      columns: ['value'],
+      records: [{ value: '+966500000011' }],
+      rowCount: 1,
+      mapping: {},
+      recipientMapping: {
+        phoneColumn: 'value',
+        messageColumn: 'value',
+        messageMode: 'prepared',
+      },
+    });
+  } catch (error) {
+    reusedPreparedColumnRejected =
+      error instanceof Error && error.message.includes('عموداً مختلفاً');
+  }
+  assert(
+    reusedPreparedColumnRejected,
+    'رفض استخدام العمود نفسه للهاتف ونص الرسالة لتجنب إنشاء رسائل غير مقصودة',
   );
   const renderedDocumentRecipients = buildDocumentRecipients({
     columns: ['phone', 'name'],

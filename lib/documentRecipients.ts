@@ -5,9 +5,12 @@ export type DocumentCampaignRecipient = {
   data: Record<string, string>;
 };
 
+export type DocumentMessageMode = 'prepared' | 'template';
+
 export type DocumentRecipientMapping = {
   phoneColumn: string;
   messageColumn?: string;
+  messageMode?: DocumentMessageMode;
 };
 
 type BuildDocumentRecipientsOptions = {
@@ -23,7 +26,7 @@ type BuildDocumentRecipientsOptions = {
 };
 
 const MESSAGE_COLUMN_PATTERN =
-  /^(message|sms|message_body|sms_body|ready_message|prepared_message|رسالة جاهزة|رسالة_جاهزة|الرسالة الجاهزة|الرسالة_الجاهزة|نص الرسالة|نص_الرسالة|نص الرسالة الجاهزة|نص_الرسالة_الجاهزة|الرسالة)$/i;
+  /^(message|sms|message_body|sms_body|sms_txt|ready_message|prepared_message|رسالة جاهزة|رسالة_جاهزة|الرسالة الجاهزة|الرسالة_الجاهزة|نص الرسالة|نص_الرسالة|نص الرسالة الجاهزة|نص_الرسالة_الجاهزة|الرسالة)$/i;
 
 export function isPreparedMessageColumn(column: string): boolean {
   return MESSAGE_COLUMN_PATTERN.test(column.trim());
@@ -63,10 +66,18 @@ export function buildDocumentRecipients({
     mapping['client'] ||
     mapping['customer'] ||
     columns.find((column) => /اسم|name|عميل|مشترك/i.test(column));
-  const messageColumn = recipientMapping?.messageColumn ||
-    columns.find(isPreparedMessageColumn);
+  const messageMode = recipientMapping?.messageMode;
+  const messageColumn = messageMode === 'template'
+    ? undefined
+    : recipientMapping?.messageColumn || columns.find(isPreparedMessageColumn);
   if (messageColumn && !columns.includes(messageColumn)) {
     throw new Error('حدد عمود الرسالة الموجود في المستند.');
+  }
+  if (messageColumn === phoneColumn) {
+    throw new Error('اختر عموداً مختلفاً لرقم الهاتف ونص الرسالة.');
+  }
+  if (messageMode === 'prepared' && !messageColumn) {
+    throw new Error('حدد عمود نص الرسالة الجاهزة.');
   }
 
   if (!messageColumn && (!templateBody || !renderMessage)) {

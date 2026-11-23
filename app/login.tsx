@@ -12,7 +12,7 @@ import {
 } from 'react-native';
 import { SafeAreaView } from 'react-native-safe-area-context';
 import { Mail, Lock, Eye, EyeOff } from 'lucide-react-native';
-import { isSupabaseConfigured, supabase } from '@/lib/supabase';
+import { isLocalApiConfigured, isSupabaseConfigured, supabase } from '@/lib/supabase';
 import { colors, fonts, spacing } from '@/constants/theme';
 
 type Mode = 'signin' | 'signup';
@@ -42,7 +42,7 @@ export default function LoginScreen() {
       setError(validationError);
       return;
     }
-    if (!isSupabaseConfigured) {
+    if (!isSupabaseConfigured && !isLocalApiConfigured) {
       setError('المصادقة غير مهيأة لهذه المعاينة. أضف إعدادات Supabase لتفعيل تسجيل الدخول.');
       return;
     }
