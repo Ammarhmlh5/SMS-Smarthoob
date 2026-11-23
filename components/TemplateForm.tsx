@@ -36,6 +36,7 @@ export type ExtractedColumn = {
   name: string;
   rawName: string;
   sampleValue?: string;
+  sampleValues: string[];
   selected: boolean;
 };
 
@@ -72,6 +73,7 @@ export function TemplateForm({ template, initialValues, onSaved, onCancel }: Tem
     start: (template?.body ?? initialValues?.body ?? '').length,
     end: (template?.body ?? initialValues?.body ?? '').length,
   });
+  const [bodyInputHeight, setBodyInputHeight] = useState(130);
 
   const [importingDoc, setImportingDoc] = useState(false);
   const [saving, setSaving] = useState(false);
@@ -103,10 +105,8 @@ export function TemplateForm({ template, initialValues, onSaved, onCancel }: Tem
       }
 
       let columns: string[] = [];
-      let sampleData: Record<string, string> = {};
       const localParsed = await parseDocumentFile(result.uri, result.name);
       columns = localParsed.columns;
-      if (localParsed.records?.length) sampleData = localParsed.records[0];
 
       if (columns.length === 0) {
         throw new Error('لم يتم العثور على أي أعمدة داخل المستند المختار.');
@@ -115,10 +115,15 @@ export function TemplateForm({ template, initialValues, onSaved, onCancel }: Tem
       // تجهيز الأعمدة المستخرجة كبنود في القائمة
       const newExtracted: ExtractedColumn[] = columns.map((col) => {
         const cleanName = col.trim().replace(/\s+/g, '_');
+        const values = localParsed.records
+          ?.map((record) => record[col]?.trim())
+          .filter((value): value is string => Boolean(value)) ?? [];
+        const uniqueValues = [...new Set(values)];
         return {
           name: cleanName,
           rawName: col,
-          sampleValue: sampleData[col] ? String(sampleData[col]).trim() : undefined,
+          sampleValue: uniqueValues[0],
+          sampleValues: uniqueValues,
           selected: true,
         };
       });
@@ -350,13 +355,13 @@ export function TemplateForm({ template, initialValues, onSaved, onCancel }: Tem
             <View style={localStyles.summaryItem}>
               <Type size={14} color={colors.neutral[500]} />
               <Text style={localStyles.summaryLabel}>القالب:</Text>
-              <Text style={localStyles.summaryValue} numberOfLines={1}>{title || 'بدون اسم'}</Text>
+              <Text style={localStyles.summaryValue} selectable>{title || 'بدون اسم'}</Text>
             </View>
             {importedFileName ? (
               <View style={localStyles.summaryItem}>
                 <FileSpreadsheet size={14} color={colors.primary[600]} />
                 <Text style={localStyles.summaryLabel}>المستند:</Text>
-                <Text style={[localStyles.summaryValue, { color: colors.primary[700] }]} numberOfLines={1}>
+                <Text style={[localStyles.summaryValue, { color: colors.primary[700] }]} selectable>
                   {importedFileName}
                 </Text>
               </View>
@@ -376,7 +381,7 @@ export function TemplateForm({ template, initialValues, onSaved, onCancel }: Tem
             </View>
 
             <TextInput
-              style={localStyles.bodyInput}
+              style={[localStyles.bodyInput, { height: bodyInputHeight }]}
               accessibilityLabel="نص الرسالة المخصص للقالب، حقل مطلوب"
               accessibilityHint="اكتب الرسالة وأدخل المتغيرات من قائمة الأعمدة"
               value={body}
@@ -385,6 +390,13 @@ export function TemplateForm({ template, initialValues, onSaved, onCancel }: Tem
                 setError(null);
               }}
               onSelectionChange={(e) => setCursorPosition(e.nativeEvent.selection)}
+              onContentSizeChange={(event) => {
+                const nextHeight = Math.min(
+                  360,
+                  Math.max(130, event.nativeEvent.contentSize.height + 24),
+                );
+                setBodyInputHeight(nextHeight);
+              }}
               placeholder="اكتب نص الرسالة هنا... واضغط زر 'إضافة' من قائمة الأعمدة أدناه لإدراج البنود تلقائياً في موضع المؤشر."
               placeholderTextColor={colors.neutral[600]}
               maxLength={MAX_BODY}
@@ -478,10 +490,19 @@ export function TemplateForm({ template, initialValues, onSaved, onCancel }: Tem
                     {/* عنوان العمود وعينة من قيمته */}
                     <View style={localStyles.columnInfo}>
                       <Text style={localStyles.columnTitle}>{col.rawName || col.name}</Text>
-                      {col.sampleValue ? (
-                        <Text style={localStyles.columnSample}>
-                          مثال: {col.sampleValue}
-                        </Text>
+                      {col.sampleValues.length > 0 ? (
+                        <View style={localStyles.columnValues}>
+                          {col.sampleValues.map((value, valueIndex) => (
+                            <View
+                              key={`${col.name}-${valueIndex}-${value}`}
+                              style={localStyles.columnValueChip}
+                            >
+                              <Text style={localStyles.columnValueText} selectable>
+                                {value}
+                              </Text>
+                            </View>
+                          ))}
+                        </View>
                       ) : null}
                     </View>
 
@@ -816,6 +837,26 @@ const localStyles = StyleSheet.create({
   columnItemSelected: {
     borderColor: colors.primary[300],
     backgroundColor: colors.primary[50] + '30',
+  },
+  columnValues: {
+    width: '100%',
+    gap: 4,
+  },
+  columnValueChip: {
+    width: '100%',
+    paddingHorizontal: 8,
+    paddingVertical: 6,
+    borderRadius: 8,
+    backgroundColor: colors.neutral[50],
+    borderWidth: 1,
+    borderColor: colors.neutral[200],
+  },
+  columnValueText: {
+    fontFamily: fonts.regular,
+    fontSize: 12,
+    lineHeight: 18,
+    color: colors.neutral[700],
+    textAlign: 'right',
   },
   checkboxTouch: {
     width: 44,
