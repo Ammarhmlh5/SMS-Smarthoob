@@ -2,7 +2,11 @@ import { useState } from 'react';
 import { ActivityIndicator, Pressable, StyleSheet, Text, View } from 'react-native';
 import { Copy, Eye, Pencil, Shield, Trash2 } from 'lucide-react-native';
 import { formStyles } from '@/components/FormField';
-import { deleteTemplate, extractPlaceholders } from '@/lib/templates';
+import {
+  deleteTemplate,
+  extractPlaceholders,
+  getTemplateReadiness,
+} from '@/lib/templates';
 import type { MessageTemplate } from '@/lib/templates';
 import { colors, fonts, spacing } from '@/constants/theme';
 
@@ -23,6 +27,7 @@ export function TemplateCard({ template, disabled, onEdit, onCopy, onPreview, on
 
   const placeholders = extractPlaceholders(template.body);
   const isDefault = template.is_default === true;
+  const readiness = getTemplateReadiness(template.title, template.body, template.variable_mappings);
   const isLong = template.body.length > 120;
   const displayBody = expanded || !isLong ? template.body : template.body.slice(0, 120) + '…';
 
@@ -59,6 +64,26 @@ export function TemplateCard({ template, disabled, onEdit, onCopy, onPreview, on
             {'  ·  '}
             {template.body.length} حرف
           </Text>
+          {!isDefault ? (
+            <View
+              accessibilityLabel={readiness.ready ? 'القالب مكتمل' : 'القالب غير مكتمل'}
+              style={[
+                styles.readinessBadge,
+                readiness.ready ? styles.readyBadge : styles.incompleteBadge,
+              ]}
+            >
+              <Text
+                style={[
+                  styles.readinessText,
+                  readiness.ready ? styles.readyBadgeText : styles.incompleteBadgeText,
+                ]}
+              >
+                {readiness.ready
+                  ? 'جاهز'
+                  : `غير مكتمل: ${readiness.missingVariables.length} متغير`}
+              </Text>
+            </View>
+          ) : null}
         </View>
 
         {/* أزرار الإجراءات */}
@@ -241,6 +266,32 @@ const styles = StyleSheet.create({
     lineHeight: 18,
     color: colors.neutral[400],
     writingDirection: 'rtl',
+  },
+  readinessBadge: {
+    alignSelf: 'flex-end',
+    borderWidth: 1,
+    borderRadius: 8,
+    paddingHorizontal: 8,
+    paddingVertical: 2,
+  },
+  readyBadge: {
+    backgroundColor: colors.success[50],
+    borderColor: colors.success[500],
+  },
+  incompleteBadge: {
+    backgroundColor: colors.error[50],
+    borderColor: colors.error[500],
+  },
+  readinessText: {
+    fontFamily: fonts.semibold,
+    fontSize: 11,
+    writingDirection: 'rtl',
+  },
+  readyBadgeText: {
+    color: colors.success[700],
+  },
+  incompleteBadgeText: {
+    color: colors.error[700],
   },
   actions: {
     flexDirection: 'row',

@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useState } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import {
   ActivityIndicator,
   Modal,
@@ -14,7 +14,7 @@ import { EmptyState } from '@/components/EmptyState';
 import { TemplateCard } from '@/components/TemplateCard';
 import { TemplateForm } from '@/components/TemplateForm';
 import { TemplatePreviewModal } from '@/components/TemplatePreviewModal';
-import { fetchTemplates } from '@/lib/templates';
+import { fetchTemplates, syncTemplates } from '@/lib/templates';
 import type { MessageTemplate } from '@/lib/templates';
 import { colors, fonts, spacing } from '@/constants/theme';
 
@@ -23,8 +23,20 @@ type FilterTab = 'all' | 'default' | 'custom';
 
 type FormState =
   | { mode: 'closed' }
-  | { mode: 'create'; initialValues?: { title: string; body: string } }
+  | {
+      mode: 'create';
+      initialValues?: {
+        title: string;
+        body: string;
+        variableMappings?: MessageTemplate['variable_mappings'];
+      };
+    }
   | { mode: 'edit'; template: MessageTemplate };
+
+type SyncFeedback = {
+  state: 'idle' | 'pending' | 'syncing' | 'synced' | 'error';
+  message?: string;
+};
 
 export default function TemplatesScreen() {
   const insets = useSafeAreaInsets();
@@ -34,18 +46,58 @@ export default function TemplatesScreen() {
   const [form, setForm] = useState<FormState>({ mode: 'closed' });
   const [filterTab, setFilterTab] = useState<FilterTab>('all');
   const [previewTemplate, setPreviewTemplate] = useState<MessageTemplate | null>(null);
+  const [syncFeedback, setSyncFeedback] = useState<SyncFeedback>({ state: 'idle' });
+  const syncPromise = useRef<Promise<void> | null>(null);
+
+  const syncPendingTemplates = useCallback((): Promise<void> => {
+    if (syncPromise.current) return syncPromise.current;
+
+    const operation = (async () => {
+      setSyncFeedback({ state: 'syncing' });
+      try {
+        const result = await syncTemplates();
+        const refreshed = await fetchTemplates(undefined, { sync: false });
+        setTemplates(refreshed);
+
+        if (!result.success) {
+          setSyncFeedback({ state: 'error', message: result.message });
+        } else if (refreshed.some((template) => template.sync_status === 'pending')) {
+          setSyncFeedback({ state: 'pending' });
+        } else {
+          setSyncFeedback({ state: 'synced' });
+        }
+      } catch (err) {
+        setSyncFeedback({
+          state: 'error',
+          message: err instanceof Error ? err.message : 'تعذر التحقق من حالة المزامنة.',
+        });
+      }
+    })();
+
+    syncPromise.current = operation.finally(() => {
+      syncPromise.current = null;
+    });
+    return syncPromise.current;
+  }, []);
 
   const load = useCallback(async () => {
     setLoading(true);
     setLoadError(null);
     try {
-      setTemplates(await fetchTemplates());
+      const loaded = await fetchTemplates();
+      setTemplates(loaded);
+      if (loaded.some((template) => template.sync_status === 'pending')) {
+        setSyncFeedback({ state: 'pending' });
+        void syncPendingTemplates();
+      } else {
+        setSyncFeedback({ state: 'idle' });
+      }
     } catch (err) {
       setLoadError(err instanceof Error ? err.message : 'تعذر تحميل القوالب.');
     } finally {
       setLoading(false);
     }
-  }, []);
+  }, [syncPendingTemplates]);
 
   useEffect(() => {
     const timer = setTimeout(() => {
@@ -76,6 +128,12 @@ export default function TemplatesScreen() {
         : [saved, ...current];
     });
     setForm({ mode: 'closed' });
+    if (saved.sync_status === 'pending') {
+      setSyncFeedback({ state: 'pending' });
+      void syncPendingTemplates();
+    } else {
+      setSyncFeedback({ state: 'synced' });
+    }
   };
 
   const handleCopy = (tmpl: MessageTemplate) => {
@@ -84,6 +142,7 @@ export default function TemplatesScreen() {
       initialValues: {
         title: `نسخة من ${tmpl.title}`,
         body: tmpl.body,
+        variableMappings: tmpl.variable_mappings,
       },
     });
   };
@@ -144,6 +203,41 @@ export default function TemplatesScreen() {
           </Pressable>
         ))}
       </View>
+
+      {syncFeedback.state !== 'idle' ? (
+        <View
+          accessibilityLiveRegion="polite"
+          style={[
+            styles.syncNotice,
+            syncFeedback.state === 'error' && styles.syncNoticeError,
+            syncFeedback.state === 'synced' && styles.syncNoticeSuccess,
+          ]}
+        >
+          {syncFeedback.state === 'syncing' ? (
+            <ActivityIndicator size="small" color={colors.primary[700]} />
+          ) : null}
+          <Text style={styles.syncNoticeText}>
+            {syncFeedback.state === 'pending'
+              ? 'توجد تغييرات محفوظة محليًا بانتظار المزامنة.'
+              : syncFeedback.state === 'syncing'
+                ? 'تم الحفظ محليًا، وتتم المزامنة الآن…'
+                : syncFeedback.state === 'synced'
+                  ? 'تمت مزامنة القوالب مع الخادم.'
+                  : `حُفظت التغييرات محليًا لكن لم تكتمل المزامنة. ${syncFeedback.message ?? ''}`}
+          </Text>
+          {syncFeedback.state === 'pending' || syncFeedback.state === 'error' ? (
+            <Pressable
+              accessibilityRole="button"
+              accessibilityLabel="إعادة محاولة مزامنة القوالب"
+              onPress={() => void syncPendingTemplates()}
+              style={({ pressed }) => [styles.syncRetryButton, pressed && styles.pressed]}
+            >
+              <RotateCw size={15} color={colors.primary[700]} />
+              <Text style={styles.syncRetryText}>إعادة المحاولة</Text>
+            </Pressable>
+          ) : null}
+        </View>
+      ) : null}
 
       {/* محتوى الشاشة */}
       {loading ? (
@@ -235,6 +329,7 @@ export default function TemplatesScreen() {
       {/* Modal المعاينة */}
       {previewTemplate && (
         <TemplatePreviewModal
+          key={previewTemplate.id}
           template={previewTemplate}
           visible={previewTemplate !== null}
           onClose={() => setPreviewTemplate(null)}
@@ -302,6 +397,53 @@ const styles = StyleSheet.create({
     paddingVertical: spacing.sm,
     gap: spacing.xs,
     backgroundColor: colors.neutral[0],
+  },
+  syncNotice: {
+    flexDirection: 'row-reverse',
+    alignItems: 'center',
+    gap: spacing.xs,
+    marginHorizontal: spacing.md,
+    marginTop: spacing.xs,
+    padding: spacing.sm,
+    borderRadius: 12,
+    borderWidth: 1,
+    borderColor: colors.primary[200],
+    backgroundColor: colors.primary[50],
+  },
+  syncNoticeError: {
+    borderColor: colors.error[100],
+    backgroundColor: colors.error[50],
+  },
+  syncNoticeSuccess: {
+    borderColor: colors.success[100],
+    backgroundColor: colors.success[50],
+  },
+  syncNoticeText: {
+    flex: 1,
+    minWidth: 0,
+    fontFamily: fonts.regular,
+    fontSize: 13,
+    lineHeight: 20,
+    color: colors.neutral[800],
+    textAlign: 'right',
+    writingDirection: 'rtl',
+  },
+  syncRetryButton: {
+    flexDirection: 'row-reverse',
+    alignItems: 'center',
+    gap: 5,
+    borderRadius: 9,
+    borderWidth: 1,
+    borderColor: colors.primary[200],
+    paddingHorizontal: spacing.xs,
+    paddingVertical: 7,
+    backgroundColor: colors.neutral[0],
+  },
+  syncRetryText: {
+    fontFamily: fonts.semibold,
+    fontSize: 12,
+    color: colors.primary[700],
+    writingDirection: 'rtl',
   },
   tab: {
     flexDirection: 'row-reverse',

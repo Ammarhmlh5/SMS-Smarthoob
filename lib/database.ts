@@ -25,6 +25,7 @@ export interface MessageTemplate {
   id: string;
   title: string;
   body: string;
+  variable_mappings: string;
   user_id: string;
   is_default: boolean;
   created_at: string;
@@ -178,6 +179,7 @@ class Database {
         id TEXT PRIMARY KEY,
         title TEXT NOT NULL,
         body TEXT NOT NULL,
+        variable_mappings TEXT NOT NULL DEFAULT '{}',
         user_id TEXT NOT NULL,
         is_default INTEGER DEFAULT 0,
         created_at TEXT NOT NULL,
@@ -265,6 +267,15 @@ class Database {
       CREATE INDEX IF NOT EXISTS idx_outgoing_status ON outgoing_messages(status);
       CREATE INDEX IF NOT EXISTS idx_outgoing_campaign ON outgoing_messages(campaign_id);
     `);
+
+    const templateColumns = await this.db.getAllAsync<{ name: string }>(
+      'PRAGMA table_info(templates)',
+    );
+    if (!templateColumns.some((column) => column.name === 'variable_mappings')) {
+      await this.db.execAsync(
+        "ALTER TABLE templates ADD COLUMN variable_mappings TEXT NOT NULL DEFAULT '{}'",
+      );
+    }
 
     // Insert default templates if not exist
     await this.seedDefaultTemplates();
@@ -408,7 +419,7 @@ class Database {
   // =====================
 
   async getTemplates(userId: string): Promise<MessageTemplate[]> {
-    if (!this.db) await this.initialize();
+    if (!this.isInitialized) await this.initialize();
     
     return await this.db!.getAllAsync<MessageTemplate>(
       'SELECT * FROM templates WHERE user_id = ? OR is_default = 1 ORDER BY updated_at DESC',
@@ -417,7 +428,7 @@ class Database {
   }
 
   async getTemplate(id: string): Promise<MessageTemplate | null> {
-    if (!this.db) await this.initialize();
+    if (!this.isInitialized) await this.initialize();
     
     return await this.db!.getFirstAsync<MessageTemplate>(
       'SELECT * FROM templates WHERE id = ?',
@@ -426,7 +437,7 @@ class Database {
   }
 
   async createTemplate(template: Omit<MessageTemplate, 'sync_status'>): Promise<MessageTemplate> {
-    if (!this.db) await this.initialize();
+    if (!this.isInitialized) await this.initialize();
     
     const now = new Date().toISOString();
     const newTemplate: MessageTemplate = {
@@ -436,42 +447,67 @@ class Database {
       updated_at: now
     };
 
-    await this.db!.runAsync(
-      `INSERT INTO templates (id, title, body, user_id, is_default, created_at, updated_at, sync_status)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
-      [newTemplate.id, newTemplate.title, newTemplate.body, newTemplate.user_id, 
-       newTemplate.is_default ? 1 : 0, newTemplate.created_at, newTemplate.updated_at, newTemplate.sync_status]
-    );
-
-    // Log for sync
-    await this.logSync('templates', newTemplate.id, 'create');
+    await this.withTransaction(async (transaction) => {
+      await transaction.runAsync(
+        `INSERT INTO templates (id, title, body, variable_mappings, user_id, is_default, created_at, updated_at, sync_status)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+        [
+          newTemplate.id,
+          newTemplate.title,
+          newTemplate.body,
+          newTemplate.variable_mappings ?? '{}',
+          newTemplate.user_id,
+          newTemplate.is_default ? 1 : 0,
+          newTemplate.created_at,
+          newTemplate.updated_at,
+          newTemplate.sync_status,
+        ],
+      );
+      await this.logSync('templates', newTemplate.id, 'create', transaction);
+    });
     
     return newTemplate;
   }
 
   async updateTemplate(id: string, updates: Partial<MessageTemplate>): Promise<void> {
-    if (!this.db) await this.initialize();
+    if (!this.isInitialized) await this.initialize();
     
     const now = new Date().toISOString();
-    await this.db!.runAsync(
-      'UPDATE templates SET title = COALESCE(?, title), body = COALESCE(?, body), updated_at = ?, sync_status = ? WHERE id = ?',
-      [updates.title ?? null, updates.body ?? null, now, 'pending', id]
-    );
-
-    await this.logSync('templates', id, 'update');
+    await this.withTransaction(async (transaction) => {
+      await transaction.runAsync(
+        `UPDATE templates
+         SET title = COALESCE(?, title),
+             body = COALESCE(?, body),
+             variable_mappings = COALESCE(?, variable_mappings),
+             updated_at = ?,
+             sync_status = ?
+         WHERE id = ?`,
+        [
+          updates.title ?? null,
+          updates.body ?? null,
+          updates.variable_mappings ?? null,
+          now,
+          'pending',
+          id,
+        ],
+      );
+      await this.logSync('templates', id, 'update', transaction);
+    });
   }
 
   async deleteTemplate(id: string): Promise<void> {
-    if (!this.db) await this.initialize();
+    if (!this.isInitialized) await this.initialize();
 
-    const template = await this.db!.getFirstAsync<{ is_default: number }>(
-      'SELECT is_default FROM templates WHERE id = ?',
-      [id],
-    );
-    if (!template || template.is_default === 1) return;
+    await this.withTransaction(async (transaction) => {
+      const template = await transaction.getFirstAsync<{ is_default: number }>(
+        'SELECT is_default FROM templates WHERE id = ?',
+        [id],
+      );
+      if (!template || template.is_default === 1) return;
 
-    await this.db!.runAsync('DELETE FROM templates WHERE id = ?', [id]);
-    await this.logSync('templates', id, 'delete');
+      await transaction.runAsync('DELETE FROM templates WHERE id = ?', [id]);
+      await this.logSync('templates', id, 'delete', transaction);
+    });
   }
 
   // =====================
@@ -479,7 +515,7 @@ class Database {
   // =====================
 
   async getCampaigns(userId: string): Promise<Campaign[]> {
-    if (!this.db) await this.initialize();
+    if (!this.isInitialized) await this.initialize();
     
     return await this.db!.getAllAsync<Campaign>(
       'SELECT * FROM campaigns WHERE user_id = ? ORDER BY created_at DESC',
@@ -488,7 +524,7 @@ class Database {
   }
 
   async getCampaign(id: string): Promise<Campaign | null> {
-    if (!this.db) await this.initialize();
+    if (!this.isInitialized) await this.initialize();
     
     return await this.db!.getFirstAsync<Campaign>(
       'SELECT * FROM campaigns WHERE id = ?',
@@ -497,7 +533,7 @@ class Database {
   }
 
   async createCampaign(campaign: Omit<Campaign, 'sync_status'>): Promise<Campaign> {
-    if (!this.db) await this.initialize();
+    if (!this.isInitialized) await this.initialize();
     
     const now = new Date().toISOString();
     const newCampaign: Campaign = {
@@ -532,7 +568,7 @@ class Database {
       recipients,
       messages,
     );
-    if (!this.db) await this.initialize();
+    if (!this.isInitialized) await this.initialize();
 
     const now = new Date().toISOString();
     await this.withTransaction(async (transaction) => {
@@ -577,8 +613,17 @@ class Database {
   }
 
   async updateCampaignStatus(id: string, status: Campaign['status'], sentCount?: number, failedCount?: number): Promise<void> {
-    if (!this.db) await this.initialize();
-    
+    if (!this.isInitialized) await this.initialize();
+
+    await this.updateCampaignStatusRecord(id, status, sentCount, failedCount);
+  }
+
+  private async updateCampaignStatusRecord(
+    id: string,
+    status: Campaign['status'],
+    sentCount?: number,
+    failedCount?: number,
+  ): Promise<void> {
     const now = new Date().toISOString();
     await this.db!.runAsync(
       'UPDATE campaigns SET status = ?, sent_count = COALESCE(?, sent_count), failed_count = COALESCE(?, failed_count), updated_at = ?, sync_status = ? WHERE id = ?',
@@ -593,7 +638,7 @@ class Database {
   // =====================
 
   async addRecipients(recipients: Omit<CampaignRecipient, 'sync_status'>[]): Promise<void> {
-    if (!this.db) await this.initialize();
+    if (!this.isInitialized) await this.initialize();
     
     for (const recipient of recipients) {
       await this.db!.runAsync(
@@ -607,7 +652,7 @@ class Database {
   }
 
   async getRecipients(campaignId: string): Promise<CampaignRecipient[]> {
-    if (!this.db) await this.initialize();
+    if (!this.isInitialized) await this.initialize();
     
     return await this.db!.getAllAsync<CampaignRecipient>(
       'SELECT * FROM campaign_recipients WHERE campaign_id = ? ORDER BY id',
@@ -616,7 +661,7 @@ class Database {
   }
 
   async updateRecipientStatus(id: string, status: CampaignRecipient['status'], errorMessage?: string): Promise<void> {
-    if (!this.db) await this.initialize();
+    if (!this.isInitialized) await this.initialize();
     
     const sentAt = status === 'sent' ? new Date().toISOString() : null;
     await this.db!.runAsync(
@@ -631,7 +676,7 @@ class Database {
   // =====================
 
   async getConnections(userId: string): Promise<GatewayConnection[]> {
-    if (!this.db) await this.initialize();
+    if (!this.isInitialized) await this.initialize();
     
     return await this.db!.getAllAsync<GatewayConnection>(
       'SELECT * FROM gateway_connections WHERE user_id = ? ORDER BY created_at DESC',
@@ -640,7 +685,7 @@ class Database {
   }
 
   async saveConnection(connection: Omit<GatewayConnection, 'sync_status'>): Promise<GatewayConnection> {
-    if (!this.db) await this.initialize();
+    if (!this.isInitialized) await this.initialize();
     
     const now = new Date().toISOString();
     const newConnection: GatewayConnection = {
@@ -679,10 +724,16 @@ class Database {
   // Sync Operations
   // =====================
 
-  private async logSync(tableName: string, recordId: string, action: SyncLog['action']): Promise<void> {
-    if (!this.db) return;
+  private async logSync(
+    tableName: string,
+    recordId: string,
+    action: SyncLog['action'],
+    transaction?: SQLite.SQLiteDatabase,
+  ): Promise<void> {
+    const database = transaction ?? this.db;
+    if (!database) return;
     
-    await this.db!.runAsync(
+    await database.runAsync(
       'INSERT INTO sync_log (table_name, record_id, action, timestamp, synced) VALUES (?, ?, ?, ?, 0)',
       [tableName, recordId, action, new Date().toISOString()]
     );
@@ -708,7 +759,7 @@ class Database {
   }
 
   private async performSyncWithSupabase(): Promise<{ success: boolean; message: string }> {
-    if (!this.db) await this.initialize();
+    if (!this.isInitialized) await this.initialize();
 
     try {
       if (isLocalApiConfigured && localApiUrl) {
@@ -816,6 +867,7 @@ class Database {
       id: template.id,
       title: template.title,
       body: template.body,
+      variable_mappings: JSON.parse(template.variable_mappings || '{}'),
       user_id: template.user_id,
       created_at: template.created_at,
       updated_at: template.updated_at
@@ -872,17 +924,26 @@ class Database {
     if (templates && templates.length > 0) {
       for (const template of templates) {
         await this.db!.runAsync(
-          `INSERT INTO templates (id, title, body, user_id, is_default, created_at, updated_at, sync_status)
-           VALUES (?, ?, ?, ?, 0, ?, ?, 'synced')
+          `INSERT INTO templates (id, title, body, variable_mappings, user_id, is_default, created_at, updated_at, sync_status)
+           VALUES (?, ?, ?, ?, ?, 0, ?, ?, 'synced')
            ON CONFLICT(id) DO UPDATE SET
              title = excluded.title,
              body = excluded.body,
+             variable_mappings = excluded.variable_mappings,
              user_id = excluded.user_id,
              created_at = excluded.created_at,
              updated_at = excluded.updated_at,
              sync_status = 'synced'
            WHERE templates.sync_status = 'synced'`,
-          [template.id, template.title, template.body, template.user_id, template.created_at, template.updated_at]
+          [
+            template.id,
+            template.title,
+            template.body,
+            JSON.stringify(template.variable_mappings ?? {}),
+            template.user_id,
+            template.created_at,
+            template.updated_at,
+          ]
         );
       }
     }
@@ -931,7 +992,7 @@ class Database {
     messages: { phone: string; message: string; payload?: unknown }[],
     maxRetries: number = 3
   ): Promise<void> {
-    if (!this.db) await this.initialize();
+    if (!this.isInitialized) await this.initialize();
     const now = new Date().toISOString();
 
     for (const msg of messages) {
@@ -960,7 +1021,7 @@ class Database {
     campaignId: string,
     correlationId: string,
   ): Promise<OutgoingMessage[]> {
-    if (!this.db) await this.initialize();
+    if (!this.isInitialized) await this.initialize();
 
     if (!Number.isInteger(limit) || limit < 1) {
       throw new RangeError('حجم حجز الرسائل يجب أن يكون أكبر من صفر.');
@@ -995,7 +1056,7 @@ class Database {
   }
 
   async releaseClaimedOutgoingMessages(correlationId: string): Promise<void> {
-    if (!this.db) await this.initialize();
+    if (!this.isInitialized) await this.initialize();
     const now = new Date().toISOString();
     await this.db!.runAsync(
       `UPDATE outgoing_messages
@@ -1006,7 +1067,7 @@ class Database {
   }
 
   async refreshClaimedOutgoingMessages(correlationId: string): Promise<void> {
-    if (!this.db) await this.initialize();
+    if (!this.isInitialized) await this.initialize();
     const now = new Date().toISOString();
     const expiresBefore = new Date(Date.now() - CAMPAIGN_CLAIM_LEASE_MS).toISOString();
     await this.db!.runAsync(
@@ -1017,7 +1078,7 @@ class Database {
   }
 
   async startClaimedOutgoingMessageAttempt(id: number, correlationId: string): Promise<boolean> {
-    if (!this.db) await this.initialize();
+    if (!this.isInitialized) await this.initialize();
     const now = new Date().toISOString();
     const expiresBefore = new Date(Date.now() - CAMPAIGN_CLAIM_LEASE_MS).toISOString();
     const result = await this.db!.runAsync(
@@ -1035,7 +1096,7 @@ class Database {
     status: OutgoingMessageStatus,
     updates?: { error?: string; correlationId?: string; incrementRetry?: boolean }
   ): Promise<boolean> {
-    if (!this.db) await this.initialize();
+    if (!this.isInitialized) await this.initialize();
     const now = new Date().toISOString();
 
     let query = `UPDATE outgoing_messages SET status = ?, updated_at = ?, last_attempt_at = ?`;
@@ -1074,7 +1135,7 @@ class Database {
     recipientId: string | null,
     error?: string,
   ): Promise<boolean> {
-    if (!this.db) await this.initialize();
+    if (!this.isInitialized) await this.initialize();
     const now = new Date().toISOString();
 
     return this.withTransaction(async (transaction) => {
@@ -1110,7 +1171,7 @@ class Database {
   }
 
   async markOutgoingBlocked(campaignId: string, reason: string): Promise<void> {
-    if (!this.db) await this.initialize();
+    if (!this.isInitialized) await this.initialize();
     const now = new Date().toISOString();
 
     await this.withTransaction(async (transaction) => {
@@ -1221,10 +1282,10 @@ class Database {
     );
 
     for (const campaign of interruptedCampaigns) {
-      const stats = await this.getCampaignQueueStats(campaign.id);
+      const stats = await this.readCampaignQueueStats(campaign.id);
       const status = resolveCampaignQueueStatus(stats);
       if (status === 'sending') continue;
-      await this.updateCampaignStatus(
+      await this.updateCampaignStatusRecord(
         campaign.id,
         status,
         stats.sent,
@@ -1241,8 +1302,19 @@ class Database {
     blocked: number;
     total: number;
   }> {
-    if (!this.db) await this.initialize();
+    if (!this.isInitialized) await this.initialize();
 
+    return this.readCampaignQueueStats(campaignId);
+  }
+
+  private async readCampaignQueueStats(campaignId: string): Promise<{
+    pending: number;
+    sending: number;
+    sent: number;
+    failed: number;
+    blocked: number;
+    total: number;
+  }> {
     const rows = await this.db!.getAllAsync<{ status: OutgoingMessageStatus; count: number }>(
       `SELECT status, COUNT(*) as count 
        FROM outgoing_messages 
@@ -1275,7 +1347,7 @@ class Database {
   // =====================
 
   async getPendingSyncCount(): Promise<number> {
-    if (!this.db) await this.initialize();
+    if (!this.isInitialized) await this.initialize();
     
     const result = await this.db!.getFirstAsync<{ count: number }>(
       'SELECT COUNT(*) as count FROM sync_log WHERE synced = 0'
@@ -1285,7 +1357,7 @@ class Database {
   }
 
   async clearAllData(): Promise<void> {
-    if (!this.db) await this.initialize();
+    if (!this.isInitialized) await this.initialize();
     
     await this.db!.execAsync(`
       DELETE FROM outgoing_messages;

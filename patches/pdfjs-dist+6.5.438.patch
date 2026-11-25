@@ -1,0 +1,37 @@
+diff --git a/node_modules/pdfjs-dist/legacy/build/pdf.mjs b/node_modules/pdfjs-dist/legacy/build/pdf.mjs
+index 443668f..7351bf8 100644
+--- a/node_modules/pdfjs-dist/legacy/build/pdf.mjs
++++ b/node_modules/pdfjs-dist/legacy/build/pdf.mjs
+@@ -23585,10 +23585,7 @@ class PDFWorker {
+       if (this.#mainThreadWorkerMessageHandler) {
+         return this.#mainThreadWorkerMessageHandler;
+       }
+-      const worker = await import(
+-      /*webpackIgnore: true*/
+-      /*@vite-ignore*/
+-      this.workerSrc);
++      const worker = await import("./pdf.worker.mjs");
+       return worker.WorkerMessageHandler;
+     };
+     return util_shadow(this, "_setupFakeWorkerGlobal", loader());
+diff --git a/node_modules/pdfjs-dist/legacy/build/pdf.worker.mjs b/node_modules/pdfjs-dist/legacy/build/pdf.worker.mjs
+index 7b0cb75..1ef9fde 100644
+--- a/node_modules/pdfjs-dist/legacy/build/pdf.worker.mjs
++++ b/node_modules/pdfjs-dist/legacy/build/pdf.worker.mjs
+@@ -14409,12 +14409,10 @@ class WasmImage {
+     }
+   }
+   async #getJsInstance(imports) {
+-    const {
+-      default: instantiate
+-    } = await import(
+-    /*webpackIgnore: true*/
+-    /*@vite-ignore*/
+-    `${WasmImage.#wasmUrl}${this._noWasmFilename}`);
++    const fallback = this._noWasmFilename === "jbig2_nowasm_fallback.js"
++      ? await import("../../wasm/jbig2_nowasm_fallback.js")
++      : await import("../../wasm/openjpeg_nowasm_fallback.js");
++    const instantiate = fallback.default;
+     return {
+       exports: instantiate(imports)
+     };

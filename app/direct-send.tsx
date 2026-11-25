@@ -552,6 +552,11 @@ export default function DirectSendScreen() {
           <View style={styles.importModalBackdrop}>
             <DocumentImportModal
               variables={messageMode === 'template' ? placeholders : []}
+              templateMappings={
+                messageMode === 'template'
+                  ? selectedTemplateObject?.variable_mappings
+                  : undefined
+              }
               showRecipientMapping
               recipientMessageMode={messageMode ?? undefined}
               sharedFile={sharedFile}

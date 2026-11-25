@@ -35,6 +35,7 @@ const TABLE_COLUMNS = {
     'id',
     'title',
     'body',
+    'variable_mappings',
     'user_id',
     'created_at',
     'updated_at',

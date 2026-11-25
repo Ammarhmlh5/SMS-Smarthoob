@@ -9,23 +9,17 @@ import { Platform } from 'react-native';
 import bidiFactory from 'bidi-js';
 import * as XLSX from 'xlsx';
 import { parseCSV } from '@/lib/csv';
+import {
+  loadPdfTextDocument,
+  type PdfTextDocument,
+} from '@/lib/pdfRegions';
+import { groupPdfTextItemsByRow } from '@/lib/pdfTextRows';
 
 const bidi = bidiFactory();
 
-const ARABIC_PRESENTATION_FORM =
-  /[\uFB50-\uFDFF\uFE70-\uFEFF]/;
-
 export function normalizeArabicDocumentText(value: string): string {
   if (!value) return '';
-
-  const hadArabicPresentationForms = ARABIC_PRESENTATION_FORM.test(value);
-  let normalized = value.normalize('NFKC');
-
-  // PDF engines can extract Arabic in visual/presentation-form order.
-  // Restore logical text order before bidi-js calculates the display levels.
-  if (hadArabicPresentationForms) {
-    normalized = [...normalized].reverse().join('');
-  }
+  const normalized = value.normalize('NFKC');
 
   if (/[\u0600-\u06FF]/.test(normalized)) {
     const embeddingLevels = bidi.getEmbeddingLevels(normalized, 'rtl');
@@ -308,58 +302,37 @@ function buildDocumentAnalysis(
   };
 }
 
-async function parsePdfDocument(uri: string, fileName: string): Promise<DocumentAnalysis> {
-  let data: Uint8Array;
-  if (Platform.OS === 'web') {
-    const response = await fetch(uri);
-    if (!response.ok) throw new Error('تعذر قراءة ملف PDF المختار.');
-    data = new Uint8Array(await response.arrayBuffer());
-  } else {
-    const base64 = await FileSystem.readAsStringAsync(uri, {
-      encoding: FileSystem.EncodingType.Base64,
-    });
-    const binary = globalThis.atob(base64);
-    data = new Uint8Array(binary.length);
-    for (let index = 0; index < binary.length; index += 1) {
-      data[index] = binary.charCodeAt(index);
-    }
-  }
-
-  const pdfjs = await import('pdfjs-dist/legacy/build/pdf.mjs');
-  if (Platform.OS === 'web' && typeof window !== 'undefined') {
-    pdfjs.GlobalWorkerOptions.workerSrc = '/pdf.worker.mjs';
-  }
-  const pdf = await pdfjs.getDocument({ data }).promise;
+export async function analyzePdfDocument(
+  uri: string,
+  fileName: string,
+  options: { allowTextOnly?: boolean } = {},
+): Promise<{ analysis: DocumentAnalysis; textDocument: PdfTextDocument }> {
+  const textDocument = await loadPdfTextDocument(uri);
   const pages: string[] = [];
+  const pageLines: string[][] = [];
+  const pageNumbers: number[] = [];
 
-  for (let pageNumber = 1; pageNumber <= pdf.numPages; pageNumber += 1) {
-    const page = await pdf.getPage(pageNumber);
-    const content = await page.getTextContent();
-    const items = content.items
-      .filter((item): item is typeof item & { str: string; transform: number[] } =>
-        typeof item === 'object' && 'str' in item && 'transform' in item,
-      );
-    const lines = new Map<number, string[]>();
-    for (const item of items) {
-      const y = Math.round(item.transform[5] / 3) * 3;
-      const line = lines.get(y) ?? [];
-      line.push(item.str);
-      lines.set(y, line);
-    }
-    const orderedLines = [...lines.entries()]
-      .sort(([yA], [yB]) => yB - yA)
-      .map(([, parts]) => normalizeArabicDocumentText(parts.join(' ').replace(/\s+/g, ' ')))
+  textDocument.pages.forEach((page, pageIndex) => {
+    const orderedLines = groupPdfTextItemsByRow(page)
+      .map((row) =>
+        normalizeArabicDocumentText(
+          row.items.map((item) => item.text).join(' | ').replace(/\s+/g, ' ').trim(),
+        ),
+      )
       .filter(Boolean);
     if (orderedLines.length > 0) {
-      pages.push(`صفحة ${pageNumber}\n${orderedLines.join('\n')}`);
+      pages.push(`صفحة ${pageIndex + 1}\n${orderedLines.join('\n')}`);
+      pageLines.push(orderedLines);
+      pageNumbers.push(pageIndex + 1);
     }
-  }
+  });
 
   if (pages.length === 0) {
     throw new Error('لا يحتوي ملف PDF على نص قابل للاستخراج.');
   }
 
   const headers = [
+    'رقم الصفحة',
     'رقم المشترك',
     'اسم المشترك',
     'رقم الهاتف',
@@ -369,6 +342,7 @@ async function parsePdfDocument(uri: string, fileName: string): Promise<Document
     'المبلغ المستحق',
     'المتأخرات',
     'الاستهلاك',
+    'النص المستخرج',
   ];
 
   const extractValue = (text: string, labels: string[], fallback = ''): string => {
@@ -379,37 +353,107 @@ async function parsePdfDocument(uri: string, fileName: string): Promise<Document
     return fallback;
   };
 
-  const records: Record<string, string>[] = pages.map((text) => {
+  const findLine = (lines: string[], labels: string[]): string => {
+    return lines.find((line) =>
+      labels.some((label) => line.includes(label)),
+    ) ?? '';
+  };
+
+  const extractPhoneByLine = (lines: string[]): string => {
+    const line = findLine(lines, ['هاتف المشترك', 'ھاتف المشترك', 'رقم الهاتف']);
+    const numbers = line.match(/(?:\+?966|0?)(?:777|775|773|776|770|771|772|778|779)\d{6,7}|(?:777|775|773|776|770|771|772|778|779)\d{6,7}/g);
+    return numbers?.[0] ?? '';
+  };
+
+  const extractSubscriberByLine = (lines: string[]): string => {
+    const line = findLine(lines, ['رقم المشترك']);
+    const threeDigit = line.match(/\b\d{3}\b/g);
+    if (threeDigit?.[0]) return threeDigit[0];
+    const numbers = line.match(/\d{1,6}/g) ?? [];
+    return numbers.find((number) => number.length >= 2 && number.length <= 3) ?? '';
+  };
+
+  const extractBeforeLabel = (lines: string[], labels: string[]): string => {
+    const line = findLine(lines, labels);
+    if (!line) return '';
+    const labelIndex = labels
+      .map((label) => line.indexOf(label))
+      .filter((index) => index >= 0)
+      .sort((a, b) => a - b)[0];
+    if (labelIndex === undefined) return '';
+    const before = line.slice(0, labelIndex);
+    const parts = before
+      .split(/\||\/+/)
+      .map((part) => normalizeArabicDocumentText(part).trim())
+      .filter((part) => part.length >= 2 && !/^\d+$/.test(part));
+    return parts.reverse().find((part) =>
+      /[\u0600-\u06FF]/.test(part) && part.length >= 3,
+    ) ?? '';
+  };
+
+  const extractMeterByLine = (lines: string[]): string => {
+    const line = findLine(lines, ['رقم العداد']);
+    const numbers = line.match(/\d{6,14}/g);
+    return numbers?.[0] ?? '';
+  };
+
+  const records: Record<string, string>[] = pages.map((text, index) => {
     const pageText = normalizeArabicDocumentText(text);
-    const phone = pageText.match(/(?:777|775|773|776|770|771|772|778|779)[0-9]{6,7}/)?.[0] ?? '';
-    const subscriber = pageText.match(/رقم المشترك[^0-9]*(?:[-/]?[\s]*)(\d+)/)?.[1]
-      ?? pageText.match(/\b(\d{3})[-/]\d{4,6}\b/)?.[1]
-      ?? '';
+    const lines = pageLines[index] ?? [];
+    const phone = extractPhoneByLine(lines);
+    const subscriber = extractSubscriberByLine(lines)
+      || pageText.match(/(\d{3})[\s|/]{0,20}(?:التعرفة|التعرفه)/)?.[1]
+      || pageText.match(/فاتـ?ورة[^0-9]*20\d{2}[^0-9]*(\d{3})/)?.[1]
+      || '';
+    const name = extractBeforeLabel(lines, ['إسم المشترك', 'اسم المشترك']);
+    const address = extractBeforeLabel(lines, ['العنوان']);
+    const meter = extractMeterByLine(lines)
+      || pageText.match(/\b\d{12}\b/)?.[0]
+      || '';
+    const date = pageText.match(/20\d{2}[/-]\d{1,2}[/-]\d{1,2}/)?.[0] ?? '';
     return {
+      'رقم الصفحة': String(pageNumbers[index]),
       'رقم المشترك': subscriber,
-      'اسم المشترك': extractValue(pageText, ['إسم المشترك', 'اسم المشترك'], ''),
+      'اسم المشترك': name,
       'رقم الهاتف': phone,
-      'العنوان': extractValue(pageText, ['العنوان'], ''),
-      'رقم العداد': extractValue(pageText, ['رقم العداد'], ''),
-      'تاريخ الإصدار': extractValue(pageText, ['تاريخ الإصدار'], ''),
-      'المبلغ المستحق': extractValue(pageText, ['المبلغ المستحق'], ''),
+      'العنوان': address,
+      'رقم العداد': meter,
+      'تاريخ الإصدار': date,
+      'المبلغ المستحق': extractValue(
+        pageText,
+        ['المبلغ المستحق', 'الرصيد المستحق', 'المبلغ المطلوب'],
+        '',
+      ),
       'المتأخرات': extractValue(pageText, ['المتأخرات'], ''),
       'الاستهلاك': extractValue(pageText, ['الاستهلاك'], ''),
+      'النص المستخرج': pageText,
     };
   });
 
-  const hasRealData = records.some((record) =>
-    record['رقم المشترك'] || record['اسم المشترك'] || record['رقم الهاتف'] || record['العنوان'],
+  const invoiceRecords = records.filter((record) =>
+    record['النص المستخرج'] &&
+    !record['النص المستخرج'].includes('نهاية بيانات الكاشف') &&
+    (
+      record['رقم المشترك'] ||
+      record['اسم المشترك'] ||
+      record['رقم الهاتف'] ||
+      record['العنوان']
+    ),
   );
-  if (!hasRealData) {
+  const hasRealData = invoiceRecords.length > 0;
+  if (!hasRealData && !options.allowTextOnly) {
     throw new Error('تم قراءة ملف PDF، لكن لم يتم العثور على حقول فاتورة واضحة مثل رقم المشترك أو الاسم أو الهاتف.');
   }
+  const analysisRecords = hasRealData ? invoiceRecords : records;
 
   const columnInfo: Record<string, ColumnInfo> = {};
   for (const header of headers) {
-    columnInfo[header] = analyzeColumn(header, records.map((row) => row[header] || ''));
+    columnInfo[header] = analyzeColumn(header, analysisRecords.map((row) => row[header] || ''));
   }
-  return buildDocumentAnalysis(headers, records, columnInfo, fileName);
+  return {
+    analysis: buildDocumentAnalysis(headers, analysisRecords, columnInfo, fileName),
+    textDocument,
+  };
 }
 
 export async function parseDocumentFile(uri: string, fileName: string): Promise<DocumentAnalysis> {
@@ -460,8 +504,7 @@ export async function parseDocumentFile(uri: string, fileName: string): Promise<
     }
 
     if (lowerName.endsWith('.pdf')) {
-      const pdf = await parsePdfDocument(uri, fileName);
-      return pdf;
+      return (await analyzePdfDocument(uri, fileName)).analysis;
     }
 
     let content: string;

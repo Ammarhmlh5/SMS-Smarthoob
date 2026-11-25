@@ -1,3 +1,5 @@
+import { normalizeSmsPhone } from './phoneNumber';
+
 export type DocumentCampaignRecipient = {
   phone: string;
   name: string;
@@ -32,6 +34,19 @@ export function isPreparedMessageColumn(column: string): boolean {
   return MESSAGE_COLUMN_PATTERN.test(column.trim());
 }
 
+export function getDocumentPhoneValidationError(
+  records: Record<string, string>[],
+  phoneColumn: string,
+): string | null {
+  const invalidRowIndex = records.findIndex((record) => {
+    const phone = record?.[phoneColumn];
+    return typeof phone !== 'string' || !normalizeSmsPhone(phone.trim());
+  });
+  return invalidRowIndex < 0
+    ? null
+    : `رقم الهاتف فارغ أو غير صالح في الصف رقم ${invalidRowIndex + 1}. اختر عموداً يحتوي على رقم صالح لكل صف.`;
+}
+
 export function buildDocumentRecipients({
   columns,
   records,
@@ -57,6 +72,10 @@ export function buildDocumentRecipients({
     columns[0];
   if (!phoneColumn || !columns.includes(phoneColumn)) {
     throw new Error('حدد عمود رقم الهاتف في المستند.');
+  }
+  const phoneValidationError = getDocumentPhoneValidationError(records, phoneColumn);
+  if (phoneValidationError) {
+    throw new Error(phoneValidationError);
   }
   const nameColumn =
     suggestedNameColumn ||

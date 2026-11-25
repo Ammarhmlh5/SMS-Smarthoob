@@ -2,6 +2,7 @@ import { createServer } from 'node:http';
 import { readFile } from 'node:fs/promises';
 import { fileURLToPath } from 'node:url';
 import { Pool } from 'pg';
+import { allowedOrigin } from './cors.mjs';
 import { buildPostgrestQuery, LOCAL_USER_ID } from './query.mjs';
 
 const host = '127.0.0.1';
@@ -35,17 +36,6 @@ function sendJson(response, status, value, origin) {
     ...(origin ? { 'Access-Control-Allow-Origin': origin, Vary: 'Origin' } : {}),
   });
   response.end(JSON.stringify(value));
-}
-
-function allowedOrigin(origin) {
-  if (!origin) return true;
-  try {
-    const url = new URL(origin);
-    return ['localhost', '127.0.0.1'].includes(url.hostname) &&
-      ['8081', '8082', '19006'].includes(url.port);
-  } catch {
-    return false;
-  }
 }
 
 function sendError(response, status, message, origin, code = 'LOCAL_API_ERROR') {

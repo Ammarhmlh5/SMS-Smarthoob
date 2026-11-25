@@ -1,10 +1,18 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
+import { allowedOrigin } from '../backend/cors.mjs';
 import { buildPostgrestQuery, LOCAL_USER_ID } from '../backend/query.mjs';
 
 function params(value = '') {
   return new URLSearchParams(value);
 }
+
+test('local API allows the active Expo web port but rejects unrelated origins', () => {
+  assert.equal(allowedOrigin('http://localhost:8083'), true);
+  assert.equal(allowedOrigin('http://localhost:8084'), false);
+  assert.equal(allowedOrigin('https://example.com:8083'), false);
+  assert.equal(allowedOrigin(undefined), true);
+});
 
 test('select queries restrict rows to the local user and bind filter values', () => {
   const query = buildPostgrestQuery({
@@ -25,13 +33,24 @@ test('upserts assign the local owner and only update allowlisted columns', () =>
     table: 'message_templates',
     method: 'POST',
     searchParams: params('select=id,title'),
-    body: { id: 'template-id', title: 'Invoice', body: 'Hello' },
+    body: {
+      id: 'template-id',
+      title: 'Invoice',
+      body: 'Hello',
+      variable_mappings: { amount: { type: 'pdf-region', region: { left: 0.1 } } },
+    },
     prefer: 'resolution=merge-duplicates,return=representation',
   });
 
-  assert.match(query.text, /ON CONFLICT \("id"\) DO UPDATE SET "title" = EXCLUDED\."title", "body" = EXCLUDED\."body"/);
+  assert.match(query.text, /ON CONFLICT \("id"\) DO UPDATE SET "title" = EXCLUDED\."title", "body" = EXCLUDED\."body", "variable_mappings" = EXCLUDED\."variable_mappings"/);
   assert.match(query.text, /WHERE "message_templates"\."user_id" = '00000000-0000-4000-8000-000000000001'/);
-  assert.deepEqual(query.values, ['template-id', 'Invoice', 'Hello', LOCAL_USER_ID]);
+  assert.deepEqual(query.values, [
+    'template-id',
+    'Invoice',
+    'Hello',
+    { amount: { type: 'pdf-region', region: { left: 0.1 } } },
+    LOCAL_USER_ID,
+  ]);
 });
 
 test('mutations reject unfiltered access and cross-user writes', () => {

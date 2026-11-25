@@ -319,6 +319,28 @@ async function runTests() {
       explicitlyMappedDocumentRecipients[0].message === 'رسالة من العمود المختار',
     'استخدام عمودي الهاتف والرسالة اللذين اختارهما المستخدم',
   );
+  let invalidRecipientPhoneRejected = false;
+  try {
+    buildDocumentRecipients({
+      columns: ['phone', 'name'],
+      records: [
+        { phone: '+966500000008', name: 'مستلم صالح' },
+        { phone: '', name: 'مستلم بلا هاتف' },
+      ],
+      rowCount: 2,
+      mapping: {},
+      recipientMapping: { phoneColumn: 'phone', messageMode: 'template' },
+      templateBody: 'رسالة اختبار',
+      renderMessage: (body) => body,
+    });
+  } catch (error) {
+    invalidRecipientPhoneRejected =
+      error instanceof Error && error.message.includes('الصف رقم 2');
+  }
+  assert(
+    invalidRecipientPhoneRejected,
+    'رفض تجهيز المستند إذا كان رقم هاتف أي صف فارغاً أو غير صالح مع تحديد الصف',
+  );
   let reusedPreparedColumnRejected = false;
   try {
     buildDocumentRecipients({

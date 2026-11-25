@@ -4,17 +4,20 @@
   "version": "1.0.0",
   "private": true,
   "scripts": {
+    "postinstall": "patch-package",
     "dev": "expo start",
     "dev:web": "expo start --web --host localhost",
     "dev:api": "node --env-file=.env.local backend/server.mjs",
     "build:web": "expo export --platform web",
     "lint": "expo lint",
     "typecheck": "tsc --noEmit",
-    "test": "node --experimental-strip-types tests/delivery-safety.test.ts",
+    "test": "node --experimental-strip-types --test tests/delivery-safety.test.ts tests/pdf-region.test.ts tests/pdf-document-mappings.test.ts tests/template-content.test.ts tests/template-record.test.ts",
     "test:local-api": "node --test tests/local-postgres-api.test.mjs",
     "db:migrate:default-gateway": "powershell -NoProfile -ExecutionPolicy Bypass -File scripts/apply-supabase-migration.ps1"
   },
   "dependencies": {
+    "@config-plugins/react-native-blob-util": "^14.0.2",
+    "@config-plugins/react-native-pdf": "^14.0.2",
     "@expo-google-fonts/cairo": "^0.4.2",
     "@expo/vector-icons": "^15.0.2",
     "@lucide/lab": "^0.1.2",
@@ -48,7 +51,9 @@
     "react": "19.2.3",
     "react-dom": "19.2.3",
     "react-native": "0.86.3",
+    "react-native-blob-util": "^1.1.1",
     "react-native-gesture-handler": "~2.32.0",
+    "react-native-pdf": "^7.0.5",
     "react-native-reanimated": "4.5.1",
     "react-native-safe-area-context": "~5.7.0",
     "react-native-screens": "~4.26.0",
@@ -64,6 +69,7 @@
     "@types/react": "~19.2.4",
     "eslint": "^9.0.0",
     "eslint-config-expo": "~57.0.2",
+    "patch-package": "^8.0.1",
     "typescript": "~6.0.3"
   }
 }

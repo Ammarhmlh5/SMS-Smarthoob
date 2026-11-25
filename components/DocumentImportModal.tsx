@@ -20,14 +20,19 @@ import {
 import { colors, fonts, spacing } from '@/constants/theme';
 import { 
   pickDocument, 
+  analyzePdfDocument,
   parseDocumentFile,
   pickedDocumentToUploadFile,
   suggestMapping, 
   type DocumentAnalysis,
 } from '@/lib/documentParser';
+import { applyPdfRegionMappingsToDocument } from '@/lib/pdfDocumentMappings';
+import { pdfRegionColumnName } from '@/lib/templateMappings';
+import type { TemplateVariableMappings } from '@/lib/templateMappings';
 import { parseDocument } from '@/lib/api';
 import { useAuth } from '@/lib/auth';
 import {
+  getDocumentPhoneValidationError,
   isPreparedMessageColumn,
   type DocumentMessageMode,
   type DocumentRecipientMapping,
@@ -37,6 +42,7 @@ const DEFAULT_CONNECTION_REQUIRED_MESSAGE = 'اضبط خدمة الإرسال ا
 
 type Props = {
   variables: string[];
+  templateMappings?: TemplateVariableMappings;
   showRecipientMapping?: boolean;
   recipientMessageMode?: DocumentMessageMode;
   sharedFile?: { uri: string; name: string } | null;
@@ -58,6 +64,7 @@ type Props = {
 
 export function DocumentImportModal({
   variables,
+  templateMappings = {},
   showRecipientMapping = false,
   recipientMessageMode,
   sharedFile,
@@ -94,6 +101,10 @@ export function DocumentImportModal({
       // Determine MIME type
       const lowerName = result.name.toLowerCase();
       const isCsv = lowerName.endsWith('.csv');
+      const isPdf = lowerName.endsWith('.pdf');
+      const usesPdfRegionMappings = isPdf && variables.some(
+        (variable) => templateMappings[variable]?.type === 'pdf-region',
+      );
       const mimeType = lowerName.endsWith('.pdf')
         ? 'application/pdf'
         : lowerName.endsWith('.xlsx')
@@ -104,6 +115,26 @@ export function DocumentImportModal({
 
       if (isCsv) {
         transformedDoc = await parseDocumentFile(result.uri, result.name);
+      } else if (isPdf) {
+        const { analysis, textDocument } = await analyzePdfDocument(
+          result.uri,
+          result.name,
+          { allowTextOnly: usesPdfRegionMappings },
+        );
+        if (usesPdfRegionMappings) {
+          const activeMappings: TemplateVariableMappings = {};
+          for (const variable of variables) {
+            const mapping = templateMappings[variable];
+            if (mapping) activeMappings[variable] = mapping;
+          }
+          transformedDoc = applyPdfRegionMappingsToDocument(
+            analysis,
+            textDocument,
+            activeMappings,
+          );
+        } else {
+          transformedDoc = analysis;
+        }
       } else {
         const userId = session?.user?.id || 'default';
         const uploadFile = await pickedDocumentToUploadFile(result, mimeType);
@@ -145,6 +176,17 @@ export function DocumentImportModal({
         for (const mapping of suggested) {
           initial[mapping.variable] = mapping.column;
         }
+        for (const variable of variables) {
+          const savedMapping = templateMappings[variable];
+          const savedColumn = savedMapping?.type === 'pdf-region' && usesPdfRegionMappings
+            ? pdfRegionColumnName(variable)
+            : savedMapping?.type === 'column'
+              ? savedMapping.column
+              : undefined;
+          if (savedColumn && transformedDoc.columns.includes(savedColumn)) {
+            initial[variable] = savedColumn;
+          }
+        }
         setManualMappings(initial);
         setPhoneColumn(
           transformedDoc.suggestedPhoneColumn ||
@@ -162,7 +204,7 @@ export function DocumentImportModal({
     } finally {
       setLoading(false);
     }
-  }, [session, variables]);
+  }, [session, templateMappings, variables]);
 
   useEffect(() => {
     if (!sharedFile) return;
@@ -210,6 +252,16 @@ export function DocumentImportModal({
     if (showRecipientMapping && !phoneColumn) {
       setError('حدد عمود رقم الهاتف للمتابعة.');
       return null;
+    }
+    if (showRecipientMapping) {
+      const phoneValidationError = getDocumentPhoneValidationError(
+        document.records ?? [],
+        phoneColumn,
+      );
+      if (phoneValidationError) {
+        setError(phoneValidationError);
+        return null;
+      }
     }
     if (showRecipientMapping && usesPreparedMessage && !messageColumn) {
       setError('حدد عمود نص الرسالة الجاهزة للمتابعة.');
@@ -376,20 +428,32 @@ export function DocumentImportModal({
             ? 'ستُنشأ رسالة لكل صف باستخدام القالب المختار وأعمدة المستند'
             : 'حدد العمود المناسب لكل متغير من ملف البيانات'}
         </Text>
-        {variables.map((variable) => (
-          <View key={variable} style={styles.mappingRow}>
-            <View style={styles.variableInfo}>
-              <Text style={styles.variableName}>{`{{${variable}}}`}</Text>
-              <Text style={styles.variableHint}>
-                {document.columnInfo[manualMappings[variable]]?.type === 'unknown'
-                  ? 'لم يتم الربط'
-                  : document.columnInfo[manualMappings[variable]]?.type}
-              </Text>
-            </View>
-            <View style={styles.arrowContainer}>
-              <ArrowRight size={16} color={colors.neutral[400]} strokeWidth={2} />
-            </View>
-            <View style={styles.columnPicker}>
+        {variables.map((variable) => {
+          const savedMapping = templateMappings[variable];
+          const savedColumn = savedMapping?.type === 'pdf-region'
+            ? pdfRegionColumnName(variable)
+            : savedMapping?.type === 'column'
+              ? savedMapping.column
+              : undefined;
+          const isUsingSavedMapping = Boolean(
+            savedColumn && manualMappings[variable] === savedColumn,
+          );
+          const variableHint = isUsingSavedMapping
+            ? 'الربط المحفوظ من القالب'
+            : document.columnInfo[manualMappings[variable]]?.type === 'unknown'
+              ? 'لم يتم الربط'
+              : document.columnInfo[manualMappings[variable]]?.type;
+
+          return (
+            <View key={variable} style={styles.mappingRow}>
+              <View style={styles.variableInfo}>
+                <Text style={styles.variableName}>{`{{${variable}}}`}</Text>
+                <Text style={styles.variableHint}>{variableHint}</Text>
+              </View>
+              <View style={styles.arrowContainer}>
+                <ArrowRight size={16} color={colors.neutral[400]} strokeWidth={2} />
+              </View>
+              <View style={styles.columnPicker}>
               <ScrollView
                 horizontal
                 showsHorizontalScrollIndicator={false}
@@ -435,9 +499,10 @@ export function DocumentImportModal({
                   </Pressable>
                 ))}
               </ScrollView>
+              </View>
             </View>
-          </View>
-        ))}
+          );
+        })}
       </View>
     );
 

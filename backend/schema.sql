@@ -12,10 +12,14 @@ CREATE TABLE IF NOT EXISTS public.message_templates (
   id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
   title text NOT NULL CHECK (length(trim(title)) BETWEEN 1 AND 100),
   body text NOT NULL CHECK (length(trim(body)) >= 1 AND length(body) <= 1000),
+  variable_mappings jsonb NOT NULL DEFAULT '{}'::jsonb,
   user_id uuid NOT NULL DEFAULT '00000000-0000-4000-8000-000000000001',
   created_at timestamptz NOT NULL DEFAULT now(),
   updated_at timestamptz NOT NULL DEFAULT now()
 );
+
+ALTER TABLE public.message_templates
+  ADD COLUMN IF NOT EXISTS variable_mappings jsonb NOT NULL DEFAULT '{}'::jsonb;
 
 CREATE TABLE IF NOT EXISTS public.gateway_settings (
   id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
